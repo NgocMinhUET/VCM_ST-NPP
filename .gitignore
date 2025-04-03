@@ -1,0 +1,70 @@
+# IDE and configuration directories
+.cursor/
+.idea/
+.vscode/
+
+
+# Environment directories
+.conda/
+venv/
+env/
+.env/
+.venv/
+
+# Binary directories
+ffmpeg/
+ffmpeg*/
+
+# Generated content
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+results/
+
+# Large model files and datasets
+datasets/
+trained_models/
+*.pt
+*.pth
+*.h5
+*.ckpt
+*.weights
+
+# Media files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tif
+*.tiff
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+evaluation_report.md
+cursor.json
+git_guid.txt
