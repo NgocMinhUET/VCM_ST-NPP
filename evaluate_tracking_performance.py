@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """
-Script to evaluate tracking performance on videos compressed with the improved autoencoder.
+Script to evaluate tracking performance on image sequences compressed with the improved autoencoder.
+Supports both MOT sequences and generic image directory formats.
 """
 
 import os
@@ -12,15 +13,20 @@ from pathlib import Path
 from tqdm import tqdm
 import motmetrics as mm
 from motmetrics.metrics import MOTAccumulator
+import glob
 
 from improved_autoencoder import ImprovedAutoencoder
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate tracking performance on compressed videos")
+    parser = argparse.ArgumentParser(description="Evaluate tracking performance on compressed image sequences")
     
     # Input parameters
-    parser.add_argument("--sequence_path", type=str, required=True,
-                        help="Path to MOT sequence directory")
+    parser.add_argument("--input_path", type=str, required=True,
+                        help="Path to image sequence directory. Can be either a MOT sequence dir or regular image dir")
+    parser.add_argument("--input_format", type=str, default="auto", choices=["auto", "mot", "images"],
+                        help="Format of input: 'mot' for MOT sequence, 'images' for image directory, 'auto' to detect")
+    parser.add_argument("--image_pattern", type=str, default="*.jpg",
+                        help="Pattern for image files when using regular image directory (e.g., '*.jpg', '*.png')")
     parser.add_argument("--model_path", type=str, 
                         default="trained_models/improved_autoencoder/autoencoder_best.pt",
                         help="Path to trained model checkpoint")
@@ -36,6 +42,8 @@ def parse_args():
     # Tracking parameters
     parser.add_argument("--tracker_type", type=str, default="CSRT",
                         help="OpenCV tracker type (CSRT, KCF, etc.)")
+    parser.add_argument("--gt_file", type=str, default=None,
+                        help="Path to ground truth file for non-MOT sequences")
     
     # Evaluation parameters
     parser.add_argument("--max_frames", type=int, default=None,
@@ -68,6 +76,39 @@ def load_mot_groundtruth(gt_path, max_frames=None):
         frame_count = 600 if max_frames is None else max_frames
         for frame in range(1, frame_count + 1):
             gt_data[frame] = [(1, (100, 100, 50, 100))]
+    return gt_data
+
+def load_custom_groundtruth(gt_path, max_frames=None):
+    """Load custom ground truth data from file."""
+    gt_data = {}
+    if gt_path is None:
+        print("No ground truth file provided. Creating dummy ground truth.")
+        frame_count = 600 if max_frames is None else max_frames
+        for frame in range(1, frame_count + 1):
+            gt_data[frame] = [(1, (100, 100, 50, 100))]
+        return gt_data
+        
+    try:
+        # Try to load generic format: frame_id, track_id, x, y, w, h
+        with open(gt_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) >= 6:  # Minimal format
+                    frame = int(float(parts[0]))
+                    if max_frames is not None and frame > max_frames:
+                        continue
+                    track_id = int(float(parts[1]))
+                    x, y, w, h = map(float, parts[2:6])
+                    if frame not in gt_data:
+                        gt_data[frame] = []
+                    gt_data[frame].append((track_id, (x, y, w, h)))
+    except Exception as e:
+        print(f"Error loading ground truth: {e}")
+        print("Creating dummy ground truth.")
+        frame_count = 600 if max_frames is None else max_frames
+        for frame in range(1, frame_count + 1):
+            gt_data[frame] = [(1, (100, 100, 50, 100))]
+    
     return gt_data
 
 def track_object_simple(frames, initial_box):
@@ -305,7 +346,7 @@ def main():
     ).to(device)
     
     try:
-        checkpoint = torch.load(args.model_path, map_location=device)
+        checkpoint = torch.load(args.model_path, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
         model.eval()
         print("Model loaded successfully")
@@ -316,26 +357,52 @@ def main():
         print(f"Error loading model: {e}")
         print("Proceeding with uninitialized model for testing purposes")
     
-    # Load sequence frames and ground truth
+    # Determine input format and load sequence data
+    input_path = Path(args.input_path)
+    input_format = args.input_format
+    
+    # Auto-detect format if requested
+    if input_format == "auto":
+        # Check if it looks like a MOT sequence directory
+        if (input_path / "img1").exists() and (input_path / "gt").exists():
+            input_format = "mot"
+        else:
+            input_format = "images"
+        print(f"Auto-detected input format: {input_format}")
+    
+    # Load frames based on format
     print("Loading sequence data...")
-    sequence_dir = Path(args.sequence_path)
-    gt_path = sequence_dir / "gt" / "gt.txt"
-    img_dir = sequence_dir / "img1"
+    original_frames = []
     
-    if not img_dir.exists():
-        raise ValueError(f"Image directory not found at {img_dir}")
-    
-    # Load frames
-    frame_files = sorted(img_dir.glob("*.jpg"))
-    if not frame_files:
-        raise ValueError(f"No image files found in {img_dir}")
+    if input_format == "mot":
+        # MOT format: img1 directory with frames
+        img_dir = input_path / "img1"
+        gt_path = input_path / "gt" / "gt.txt"
+        
+        if not img_dir.exists():
+            raise ValueError(f"Image directory not found at {img_dir}")
+        
+        # Load frames
+        frame_files = sorted(img_dir.glob("*.jpg"))
+        if not frame_files:
+            frame_files = sorted(img_dir.glob("*.png"))  # Try PNG if no JPG
+        
+        if not frame_files:
+            raise ValueError(f"No image files found in {img_dir}")
+    else:
+        # Regular image directory
+        frame_files = sorted(list(input_path.glob(args.image_pattern)))
+        gt_path = args.gt_file
+        
+        if not frame_files:
+            raise ValueError(f"No images matching pattern '{args.image_pattern}' found in {input_path}")
     
     # Limit frames if specified
     if args.max_frames is not None:
         frame_files = frame_files[:args.max_frames]
         print(f"Limited to first {args.max_frames} frames")
     
-    original_frames = []
+    # Load the frames
     for frame_file in tqdm(frame_files, desc="Loading frames"):
         frame = cv2.imread(str(frame_file))
         if frame is None:
@@ -348,8 +415,11 @@ def main():
     
     print(f"Loaded {len(original_frames)} frames")
     
-    # Load ground truth
-    gt_data = load_mot_groundtruth(gt_path, args.max_frames)
+    # Load ground truth based on format
+    if input_format == "mot":
+        gt_data = load_mot_groundtruth(gt_path, args.max_frames)
+    else:
+        gt_data = load_custom_groundtruth(gt_path, args.max_frames)
     
     # Compress frames
     print("Compressing frames...")
@@ -474,7 +544,7 @@ def main():
         with open(results_path, 'w') as f:
             f.write("Compression Results\n")
             f.write("==================\n\n")
-            f.write(f"Sequence: {sequence_dir.name}\n")
+            f.write(f"Sequence: {input_path.name}\n")
             f.write(f"Frames: {len(original_frames)}\n")
             f.write(f"Resolution: {original_frames[0].shape[1]}x{original_frames[0].shape[0]}\n\n")
             f.write(f"Original Size: {total_original_size / 1024 / 1024:.2f} MB\n")
@@ -499,7 +569,7 @@ def main():
         with open(results_path, 'w') as f:
             f.write("Tracking and Compression Evaluation\n")
             f.write("================================\n\n")
-            f.write(f"Sequence: {sequence_dir.name}\n")
+            f.write(f"Sequence: {input_path.name}\n")
             f.write(f"Frames: {len(original_frames)}\n")
             f.write(f"Resolution: {original_frames[0].shape[1]}x{original_frames[0].shape[0]}\n\n")
             
@@ -545,7 +615,7 @@ def main():
         with open(results_path, 'w') as f:
             f.write("Compression Results\n")
             f.write("==================\n\n")
-            f.write(f"Sequence: {sequence_dir.name}\n")
+            f.write(f"Sequence: {input_path.name}\n")
             f.write(f"Frames: {len(original_frames)}\n")
             f.write(f"Resolution: {original_frames[0].shape[1]}x{original_frames[0].shape[0]}\n\n")
             f.write(f"Original Size: {total_original_size / 1024 / 1024:.2f} MB\n")
