@@ -21,7 +21,7 @@ def parse_args():
     
     # Input parameters
     parser.add_argument("--input_video", type=str, required=True,
-                        help="Path to input video file")
+                        help="Path to input video file or image sequence (using format like %06d.jpg)")
     parser.add_argument("--model_path", type=str, 
                         default="trained_models/improved_autoencoder/autoencoder_best.pt",
                         help="Path to trained model checkpoint")
@@ -115,13 +115,22 @@ def main():
         time_reduction=args.time_reduction
     ).to(device)
     
-    checkpoint = torch.load(args.model_path, map_location=device)
+    # Sử dụng weights_only=True để tránh cảnh báo bảo mật
+    checkpoint = torch.load(args.model_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
     # Extract frames from video
     print("Extracting frames...")
-    frames = extract_frames(args.input_video)
+    frames_result = extract_frames(args.input_video)
+    
+    # Xử lý kết quả trả về từ extract_frames, giờ hàm này trả về tuple
+    if isinstance(frames_result, tuple) and len(frames_result) == 5:
+        frames, fps, width, height, frame_count = frames_result
+    else:
+        # Trường hợp phù hợp với interface cũ (nếu chưa cập nhật video_compression.py)
+        frames = frames_result
+        
     print(f"Extracted {len(frames)} frames")
     
     # Compress and evaluate
@@ -159,7 +168,14 @@ def main():
     
     # Create reconstructed video
     output_video_path = os.path.join(args.output_dir, "reconstructed.mp4")
-    create_video(reconstructed_frames, output_video_path)
+    
+    # Nếu có thông tin về fps, width, height từ extract_frames
+    if isinstance(frames_result, tuple) and len(frames_result) >= 4:
+        create_video(reconstructed_frames, output_video_path, fps, width, height)
+    else:
+        # Sử dụng phiên bản create_video không cần fps, width, height (nếu hàm create_video có hỗ trợ)
+        create_video(reconstructed_frames, output_video_path)
+        
     print(f"Saved reconstructed video to {output_video_path}")
     
     # Create comparison video
@@ -173,9 +189,15 @@ def main():
         comparison_frames.append(comparison)
     
     comparison_video_path = os.path.join(args.output_dir, "comparison.mp4")
-    create_video(comparison_frames, comparison_video_path)
+    
+    # Xử lý tương tự với comparison video
+    if isinstance(frames_result, tuple) and len(frames_result) >= 4:
+        # Chiều rộng gấp đôi vì là video so sánh side-by-side
+        create_video(comparison_frames, comparison_video_path, fps, width*2, height)
+    else:
+        create_video(comparison_frames, comparison_video_path)
+        
     print(f"Saved comparison video to {comparison_video_path}")
 
 if __name__ == "__main__":
-    args = parse_args()
     main() 

@@ -3,6 +3,7 @@ import argparse
 import torch
 import numpy as np
 import cv2
+import glob
 from pathlib import Path
 from tqdm import tqdm
 
@@ -14,7 +15,7 @@ def parse_args():
     
     # Input parameters
     parser.add_argument("--input_video", type=str, required=True,
-                        help="Path to input video file")
+                        help="Path to input video file or image sequence (using format like %06d.jpg)")
     
     # Model parameters
     parser.add_argument("--model_path", type=str, default="trained_models/mot16_model/autoencoder_best.pt",
@@ -29,9 +30,72 @@ def parse_args():
     return parser.parse_args()
 
 def extract_frames(video_path):
-    """Tách frames từ video."""
+    """Tách frames từ video hoặc chuỗi hình ảnh."""
+    print(f"Extracting frames...")
+    
+    # Kiểm tra xem đường dẫn có phải là chuỗi hình ảnh không (có chứa %)
+    if '%' in video_path:
+        print(f"Detected image sequence pattern: {video_path}")
+        # Xử lý chuỗi hình ảnh
+        frames = []
+        base_dir = os.path.dirname(video_path)
+        format_str = os.path.basename(video_path)
+        
+        # Kiểm tra thư mục có tồn tại không
+        if not os.path.exists(base_dir):
+            raise FileNotFoundError(f"Directory not found: {base_dir}")
+        
+        # Phân tích định dạng (ví dụ: %06d.jpg)
+        format_parts = format_str.split('%')
+        if len(format_parts) > 1:
+            format_spec = '%' + format_parts[1].split('.')[0]
+            extension = '.' + format_str.split('.')[-1]
+            
+            # Bắt đầu từ số 1 và tiếp tục cho đến khi không còn file
+            idx = 1
+            max_frames = 10000  # Giới hạn an toàn
+            found_files = False
+            
+            for idx in tqdm(range(1, max_frames), desc="Loading image sequence"):
+                filename = os.path.join(base_dir, (format_spec + extension) % idx)
+                if not os.path.exists(filename):
+                    if idx == 1:  # Không tìm thấy file nào
+                        raise FileNotFoundError(f"No image files found matching pattern: {video_path}")
+                    break
+                
+                found_files = True
+                # Đọc hình ảnh
+                img = cv2.imread(filename)
+                if img is None:
+                    print(f"Warning: Could not read image {filename}")
+                    continue
+                
+                # Chuyển BGR sang RGB
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+                # Resize nếu cần (để phù hợp với mô hình)
+                img = cv2.resize(img, (224, 224))
+                
+                # Chuẩn hóa về [0, 1]
+                img = img.astype(np.float32) / 255.0
+                
+                frames.append(img)
+            
+            if not found_files:
+                raise FileNotFoundError(f"No valid images found matching pattern: {video_path}")
+            
+            print(f"Extracted {len(frames)} frames from image sequence")
+            
+            # Sử dụng giá trị mặc định cho fps, width và height vì đọc từ hình ảnh
+            fps = 30.0  # Giá trị mặc định
+            height, width = frames[0].shape[:2]
+            frame_count = len(frames)
+            
+            return frames, fps, width, height, frame_count
+    
+    # Xử lý video file thông thường
     print(f"Opening video file: {video_path}")
-    # Check if file exists
+    # Kiểm tra file có tồn tại không
     if not os.path.isfile(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
         
