@@ -5,7 +5,139 @@ import cv2
 import tempfile
 import shutil
 from pathlib import Path
-import tensorflow as tf
+
+# Make TensorFlow optional
+try:
+    import tensorflow as tf
+    HAS_TENSORFLOW = True
+except ImportError:
+    HAS_TENSORFLOW = False
+    print("TensorFlow not found. Some functionality may be limited.")
+
+# Add HevcCodec class implementation
+class HevcCodec:
+    """
+    HEVC codec implementation for video encoding and decoding.
+    
+    This class provides methods to encode and decode video frames using the HEVC codec,
+    as well as calculating bitrate and distortion metrics.
+    """
+    
+    def __init__(self, yuv_format='420', preset='medium'):
+        """
+        Initialize the HEVC codec.
+        
+        Args:
+            yuv_format: YUV format to use ('420', '422', or '444')
+            preset: Encoding preset ('ultrafast', 'superfast', 'veryfast', 'faster',
+                    'fast', 'medium', 'slow', 'slower', 'veryslow')
+        """
+        self.yuv_format = yuv_format
+        self.preset = preset
+        self.temp_dir = None
+    
+    def create_temp_dir(self):
+        """Create a temporary directory for codec operations if it doesn't exist."""
+        if self.temp_dir is None:
+            self.temp_dir = tempfile.mkdtemp()
+        return self.temp_dir
+    
+    def encode_decode(self, frames, qp=23):
+        """
+        Encode and decode frames using HEVC codec.
+        
+        Args:
+            frames: Tensor of frames (B, T, C, H, W) or (T, C, H, W) in range [0, 1]
+            qp: Quantization Parameter for HEVC
+            
+        Returns:
+            Decoded frames tensor with same shape as input
+        """
+        # Handle batch dimension if present
+        has_batch_dim = len(frames.shape) == 5
+        if has_batch_dim:
+            # Process only the first item in batch to save time
+            frames = frames[0]
+        
+        # Convert frames to numpy and back to [0, 255] range
+        frames_np = frames.permute(0, 2, 3, 1).cpu().numpy() * 255.0
+        frames_np = frames_np.astype(np.uint8)
+        
+        # Get dimensions
+        time_steps, height, width, channels = frames_np.shape
+        resolution = f"{width}x{height}"
+        
+        # Create temporary directory
+        temp_dir = self.create_temp_dir()
+        temp_dir = Path(temp_dir)
+        
+        # Define file paths
+        yuv_path = temp_dir / "input.yuv"
+        encoded_path = temp_dir / "encoded.hevc"
+        decoded_yuv_path = temp_dir / "decoded.yuv"
+        
+        # Save frames as YUV
+        save_frames_as_yuv(frames_np, str(yuv_path), format=self.yuv_format)
+        
+        # Encode with HEVC
+        encode_with_hevc(
+            str(yuv_path), 
+            str(encoded_path), 
+            qp=qp, 
+            preset=self.preset, 
+            yuv_format=self.yuv_format, 
+            resolution=resolution
+        )
+        
+        # Decode back to YUV
+        decode_with_hevc(
+            str(encoded_path), 
+            str(decoded_yuv_path), 
+            yuv_format=self.yuv_format, 
+            resolution=resolution
+        )
+        
+        # Load decoded frames
+        decoded_frames_np = np.array(load_yuv_frames(
+            str(decoded_yuv_path), 
+            width, 
+            height, 
+            n_frames=time_steps, 
+            format=self.yuv_format
+        ))
+        
+        # Convert back to tensor format
+        import torch
+        decoded_frames = torch.from_numpy(decoded_frames_np).float() / 255.0
+        decoded_frames = decoded_frames.permute(0, 3, 1, 2)  # (T, C, H, W)
+        
+        # Add batch dimension back if it was present
+        if has_batch_dim:
+            decoded_frames = decoded_frames.unsqueeze(0)
+            
+        # Calculate and store bitrate
+        self.last_bpp = calculate_bpp(str(encoded_path), frames_np)
+            
+        return decoded_frames
+    
+    def calculate_bitrate(self, encoded_file_path, frames):
+        """
+        Calculate bits per pixel (bpp) for an encoded video.
+        
+        Args:
+            encoded_file_path: Path to the encoded video file
+            frames: Original frames used for encoding
+            
+        Returns:
+            Bits per pixel value
+        """
+        return calculate_bpp(encoded_file_path, frames)
+    
+    def cleanup(self):
+        """Clean up temporary files and directory."""
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+            self.temp_dir = None
 
 def save_frames_as_yuv(frames, output_path, format='420'):
     """

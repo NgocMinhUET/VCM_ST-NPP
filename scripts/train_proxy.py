@@ -30,12 +30,25 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.proxy_network import ProxyNetwork
 from models.stnpp import STNPP
 from utils.codec_utils import HevcCodec
-from utils.video_utils import VideoDataset, VideoFrameDataset
 from utils.model_utils import save_model_with_version, get_latest_model
+
+# Import utils.video_utils for its other functions
+import utils.video_utils
 
 # Import our MOT dataset
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from mot_dataset import MOTImageSequenceDataset
+try:
+    from mot_dataset import MOTImageSequenceDataset
+    HAS_MOT_DATASET = True
+except ImportError:
+    print("Warning: mot_dataset.py not found, MOT dataset functionality will not be available.")
+    print("If you need to use MOT dataset, make sure mot_dataset.py exists in the project root.")
+    HAS_MOT_DATASET = False
+
+    # Define a stub class to avoid errors
+    class MOTImageSequenceDataset:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("MOTImageSequenceDataset is not available. Please make sure mot_dataset.py exists.")
 
 
 class VideoDataset(Dataset):
@@ -219,7 +232,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train Proxy Network")
     
     # Dataset parameters
-    parser.add_argument("--dataset_path", type=str, required=True,
+    parser.add_argument("--dataset", "--dataset_path", type=str, required=True,
                         help="Path to the video dataset or MOT16 dataset directory")
     parser.add_argument("--time_steps", type=int, default=16,
                         help="Number of frames in each sequence")
@@ -243,7 +256,7 @@ def parse_args():
                         help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=100,
                         help="Number of epochs for training")
-    parser.add_argument("--lr", type=float, default=0.0001,
+    parser.add_argument("--lr", "--learning_rate", type=float, default=0.0001,
                         help="Learning rate for optimizer")
     parser.add_argument("--codec_interval", type=int, default=10,
                         help="Interval for running the actual codec (slower)")
@@ -261,6 +274,8 @@ def parse_args():
     # HEVC parameters
     parser.add_argument("--qp", type=int, default=27,
                         help="Quantization Parameter for HEVC codec")
+    parser.add_argument("--qp_values", type=str, default=None,
+                        help="Comma-separated list of QP values to train on (e.g., '22,27,32,37')")
     
     # Additional model parameters
     parser.add_argument("--backbone", type=str, default="resnet34",
@@ -286,7 +301,23 @@ def parse_args():
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to model to resume training")
     
-    return parser.parse_args()
+    # Debug parameters
+    parser.add_argument("--verbose", action="store_true",
+                        help="Enable verbose output")
+    
+    args = parser.parse_args()
+    
+    # Process QP values if provided
+    if args.qp_values:
+        try:
+            args.qp_values = [int(qp) for qp in args.qp_values.split(',')]
+            print(f"Training with multiple QP values: {args.qp_values}")
+        except ValueError:
+            print(f"Error parsing QP values: {args.qp_values}")
+            print("Using default QP value instead.")
+            args.qp_values = None
+    
+    return args
 
 
 def set_seed(seed):
@@ -309,6 +340,17 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
+    # Print key parameters for debugging
+    print(f"Training parameters:")
+    print(f"  Dataset: {args.dataset}")
+    print(f"  Batch size: {args.batch_size}")
+    print(f"  Epochs: {args.epochs}")
+    print(f"  Learning rate: {args.lr}")
+    if args.qp_values:
+        print(f"  QP values: {args.qp_values}")
+    else:
+        print(f"  QP: {args.qp}")
+    
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -323,24 +365,32 @@ def train(args):
     
     # Initialize ST-NPP model (for feature extraction)
     print("Initializing ST-NPP model...")
-    stnpp = STNPP(
-        input_channels=3,
-        output_channels=args.feature_channels,
-        spatial_backbone=args.backbone,
-        temporal_model=args.temporal_model,
-        fusion_type=args.fusion_type,
-        pretrained=True
-    ).to(device)
-    stnpp.eval()  # Set to evaluation mode for feature extraction
-    
+    try:
+        stnpp = STNPP(
+            input_channels=3,
+            output_channels=args.feature_channels,
+            spatial_backbone=args.backbone,
+            temporal_model=args.temporal_model,
+            fusion_type=args.fusion_type,
+            pretrained=True
+        ).to(device)
+        stnpp.eval()  # Set to evaluation mode for feature extraction
+    except Exception as e:
+        print(f"Error initializing ST-NPP model: {e}")
+        raise
+        
     # Initialize proxy network
     print("Initializing Proxy Network...")
-    proxy_net = ProxyNetwork(
-        input_channels=args.feature_channels,
-        base_channels=args.base_channels,
-        latent_channels=args.latent_channels
-    ).to(device)
-    
+    try:
+        proxy_net = ProxyNetwork(
+            input_channels=args.feature_channels,
+            base_channels=args.base_channels,
+            latent_channels=args.latent_channels
+        ).to(device)
+    except Exception as e:
+        print(f"Error initializing Proxy Network: {e}")
+        raise
+        
     # Initialize optimizer
     optimizer = optim.Adam(proxy_net.parameters(), lr=args.lr)
     
@@ -354,25 +404,54 @@ def train(args):
     
     # Load dataset
     print("Loading dataset...")
-    if args.use_mot_dataset:
-        # Use MOT16 dataset format
-        dataset = MOTImageSequenceDataset(
-            dataset_path=args.dataset_path,
-            time_steps=args.time_steps,
-            split=args.split,
-            frame_stride=args.frame_stride
-        )
-    else:
-        # Use video files
-        dataset = VideoDataset(
-            dataset_path=args.dataset_path,
-            time_steps=args.time_steps,
-            transform=None,
-            max_videos=args.max_videos,
-            frame_stride=args.frame_stride
-        )
-    
-    print(f"Dataset loaded with {len(dataset)} sequences")
+    try:
+        # Check if dataset path exists
+        if not os.path.exists(args.dataset):
+            print(f"ERROR: Dataset path does not exist: {args.dataset}")
+            print("Please provide a valid path to the dataset.")
+            if args.use_mot_dataset:
+                print("\nFor MOT16 dataset, the path should contain the following structure:")
+                print("  MOT16/")
+                print("  ├── train/")
+                print("  │   ├── MOT16-02/")
+                print("  │   ├── MOT16-04/")
+                print("  │   └── ...")
+                print("  └── test/")
+                print("      ├── MOT16-01/")
+                print("      ├── MOT16-03/")
+                print("      └── ...")
+            sys.exit(1)
+            
+        if args.use_mot_dataset:
+            # Use MOT16 dataset format
+            if not HAS_MOT_DATASET:
+                print("ERROR: MOT dataset functionality is not available.")
+                print("Please make sure mot_dataset.py exists in the project root.")
+                sys.exit(1)
+                
+            dataset = MOTImageSequenceDataset(
+                dataset_path=args.dataset,
+                time_steps=args.time_steps,
+                split=args.split,
+                frame_stride=args.frame_stride
+            )
+        else:
+            # Use video files
+            dataset = VideoDataset(
+                dataset_path=args.dataset,
+                time_steps=args.time_steps,
+                transform=None,
+                max_videos=args.max_videos,
+                frame_stride=args.frame_stride
+            )
+        
+        print(f"Dataset loaded with {len(dataset)} sequences")
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        raise
     
     # Create dataloader
     dataloader = DataLoader(
@@ -420,8 +499,18 @@ def train(args):
                 with torch.no_grad():
                     # Use only the first item in batch to reduce processing time
                     sample_frames = batch[0].permute(1, 0, 2, 3)  # (T, C, H, W)
+                    
+                    # Select QP value
+                    if args.qp_values:
+                        # Randomly select a QP value from the list
+                        qp = random.choice(args.qp_values)
+                        if args.verbose:
+                            print(f"Using QP value: {qp} for batch {batch_idx}")
+                    else:
+                        qp = args.qp
+                    
                     decoded_frames = hevc_encode_decode(
-                        sample_frames, args.qp, temp_dir
+                        sample_frames, qp, temp_dir
                     ).to(device)
                     
                     # Extract features from decoded frames
@@ -469,6 +558,13 @@ def train(args):
                 'rate': f"{rate.item():.4f}",
                 'distortion': f"{distortion.item():.4f}"
             })
+            
+            # Log to TensorBoard more frequently if verbose
+            if args.verbose and batch_idx % (args.log_interval // 4) == 0:
+                step = epoch * len(dataloader) + batch_idx
+                writer.add_scalar('batch/loss', rd_loss.item(), step)
+                writer.add_scalar('batch/rate', rate.item(), step)
+                writer.add_scalar('batch/distortion', distortion.item(), step)
         
         # Calculate average loss for the epoch
         avg_loss = total_loss / len(dataloader)

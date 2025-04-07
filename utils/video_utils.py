@@ -1,8 +1,36 @@
 import cv2
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.applications.resnet50 import preprocess_input as resnet_preprocess
-from tensorflow.keras.applications.efficientnet import preprocess_input as efficient_preprocess
+
+# Make TensorFlow optional
+try:
+    import tensorflow as tf
+    from tensorflow.keras.applications.resnet50 import preprocess_input as resnet_preprocess
+    from tensorflow.keras.applications.efficientnet import preprocess_input as efficient_preprocess
+    HAS_TENSORFLOW = True
+except ImportError:
+    HAS_TENSORFLOW = False
+    print("TensorFlow not found. Some functionality may be limited.")
+
+    # Define fallback preprocessing functions if TensorFlow is not available
+    def resnet_preprocess(x):
+        """Fallback ResNet preprocessing when TensorFlow is not available"""
+        # Normalize to [0, 1] and then apply approximate ResNet normalization
+        x = x.astype(np.float32) / 255.0
+        # Approximate ResNet normalization - RGB channels
+        x[:, :, :, 0] -= 0.485  # R mean
+        x[:, :, :, 0] /= 0.229  # R std
+        x[:, :, :, 1] -= 0.456  # G mean
+        x[:, :, :, 1] /= 0.224  # G std
+        x[:, :, :, 2] -= 0.406  # B mean
+        x[:, :, :, 2] /= 0.225  # B std
+        return x
+
+    def efficient_preprocess(x):
+        """Fallback EfficientNet preprocessing when TensorFlow is not available"""
+        # Normalize to [0, 1] and then scale to [-1, 1]
+        x = x.astype(np.float32) / 255.0
+        x = x * 2.0 - 1.0
+        return x
 
 def load_video(video_path, target_size=(224, 224), max_frames=None):
     """
