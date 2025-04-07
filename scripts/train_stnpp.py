@@ -22,6 +22,8 @@ from pathlib import Path
 import cv2
 import subprocess
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,6 +31,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.stnpp import STNPP
 from models.qal import QAL
 from models.proxy_network import ProxyNetwork
+from utils.video_utils import VideoDataset
+from utils.model_utils import save_model_with_version, load_model_with_version
 
 
 class VideoDataset(Dataset):
@@ -111,332 +115,388 @@ class VideoDataset(Dataset):
         return sequence
 
 
-def train(args):
-    """Main training function."""
-    # Set up device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    # Set random seeds for reproducibility
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(args.seed)
-    
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Initialize ST-NPP model
-    print("Initializing ST-NPP model...")
-    stnpp = STNPP(
-        input_channels=3,
-        output_channels=128,
-        spatial_backbone=args.spatial_backbone,
-        temporal_model=args.temporal_model,
-        fusion_type=args.fusion_type,
-        pretrained=True
-    ).to(device)
-    
-    # Initialize QAL model
-    print("Initializing QAL model...")
-    qal = QAL(feature_channels=128, hidden_dim=64).to(device)
-    
-    # Load pre-trained Proxy Network
-    print("Loading pre-trained Proxy Network...")
-    proxy_net = ProxyNetwork(
-        input_channels=128,
-        base_channels=64,
-        latent_channels=32
-    ).to(device)
-    
-    # Load the trained proxy network
-    if args.proxy_model_path:
-        print(f"Loading proxy network from {args.proxy_model_path}")
-        checkpoint = torch.load(args.proxy_model_path, map_location=device)
-        proxy_net.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        print("WARNING: No pre-trained proxy network provided")
-    
-    # Set proxy network to evaluation mode (frozen)
-    proxy_net.eval()
-    for param in proxy_net.parameters():
-        param.requires_grad = False
-    
-    # Define optimizer for ST-NPP and QAL
-    parameters = list(stnpp.parameters()) + list(qal.parameters())
-    optimizer = optim.Adam(parameters, lr=args.lr)
-    
-    # Use mixed precision training if available
-    scaler = GradScaler() if device.type == "cuda" else None
-    
-    # Create dataset and dataloader
-    print("Loading dataset...")
-    dataset = VideoDataset(
-        dataset_path=args.dataset_path,
-        time_steps=args.time_steps,
-        frame_stride=args.frame_stride,
-        max_videos=args.max_videos
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True if device.type == "cuda" else False
-    )
-    
-    print(f"Dataset loaded with {len(dataset)} sequences")
-    
-    # Set up learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
-    )
-    
-    # Define loss function for reconstruction
-    reconstruction_loss_fn = nn.MSELoss()
-    
-    # Training loop
-    print("Starting training...")
-    best_loss = float('inf')
-    for epoch in range(args.epochs):
-        start_time = time.time()
-        total_loss = 0.0
-        total_rd_loss = 0.0
-        total_recon_loss = 0.0
-        
-        # Training phase
-        stnpp.train()
-        qal.train()
-        
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
-        for batch_idx, batch in enumerate(progress_bar):
-            # Move batch to device
-            batch = batch.to(device)  # (B, T, C, H, W)
-            
-            # Create random QPs for this batch
-            qp_values = torch.randint(
-                low=args.min_qp, 
-                high=args.max_qp + 1, 
-                size=(batch.size(0),),
-                device=device
-            ).float()
-            
-            # Zero the gradients
-            optimizer.zero_grad()
-            
-            # Forward pass with mixed precision
-            if scaler is not None:
-                with autocast():
-                    # Process through ST-NPP
-                    batch_permuted = batch.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
-                    stnpp_features = stnpp(batch_permuted)
-                    
-                    # Apply QAL
-                    qal_features = qal(qp_values, stnpp_features)
-                    
-                    # Process through proxy network
-                    reconstructed, latent = proxy_net(qal_features)
-                    
-                    # Calculate rate-distortion loss
-                    rd_loss, rate, distortion = proxy_net.calculate_rd_loss(
-                        qal_features, reconstructed, latent,
-                        lambda_value=args.lambda_value,
-                        use_ssim=args.use_ssim
-                    )
-                    
-                    # Calculate reconstruction loss
-                    recon_loss = reconstruction_loss_fn(reconstructed, qal_features)
-                    
-                    # Combined loss
-                    loss = rd_loss + args.recon_weight * recon_loss
-                
-                # Backward pass and optimizer step with gradient scaling
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                # Process through ST-NPP
-                batch_permuted = batch.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
-                stnpp_features = stnpp(batch_permuted)
-                
-                # Apply QAL
-                qal_features = qal(qp_values, stnpp_features)
-                
-                # Process through proxy network
-                reconstructed, latent = proxy_net(qal_features)
-                
-                # Calculate rate-distortion loss
-                rd_loss, rate, distortion = proxy_net.calculate_rd_loss(
-                    qal_features, reconstructed, latent,
-                    lambda_value=args.lambda_value,
-                    use_ssim=args.use_ssim
-                )
-                
-                # Calculate reconstruction loss
-                recon_loss = reconstruction_loss_fn(reconstructed, qal_features)
-                
-                # Combined loss
-                loss = rd_loss + args.recon_weight * recon_loss
-                
-                # Backward pass and optimizer step
-                loss.backward()
-                optimizer.step()
-            
-            # Update statistics
-            total_loss += loss.item()
-            total_rd_loss += rd_loss.item()
-            total_recon_loss += recon_loss.item()
-            
-            # Update progress bar
-            progress_bar.set_postfix({
-                'loss': f"{loss.item():.4f}",
-                'rd_loss': f"{rd_loss.item():.4f}",
-                'recon_loss': f"{recon_loss.item():.4f}"
-            })
-        
-        # Calculate average loss for the epoch
-        avg_loss = total_loss / len(dataloader)
-        avg_rd_loss = total_rd_loss / len(dataloader)
-        avg_recon_loss = total_recon_loss / len(dataloader)
-        
-        # Update learning rate scheduler
-        scheduler.step(avg_loss)
-        
-        # Print epoch summary
-        elapsed_time = time.time() - start_time
-        print(f"Epoch {epoch+1}/{args.epochs} - "
-              f"Loss: {avg_loss:.4f}, RD Loss: {avg_rd_loss:.4f}, "
-              f"Recon Loss: {avg_recon_loss:.4f}, "
-              f"Time: {elapsed_time:.2f}s")
-        
-        # Save checkpoint if this is the best model so far
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            
-            # Save ST-NPP model
-            stnpp_path = os.path.join(args.output_dir, "stnpp_best.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': stnpp.state_dict(),
-                'loss': best_loss
-            }, stnpp_path)
-            
-            # Save QAL model
-            qal_path = os.path.join(args.output_dir, "qal_best.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': qal.state_dict(),
-                'loss': best_loss
-            }, qal_path)
-            
-            print(f"Saved best model checkpoints to {stnpp_path} and {qal_path}")
-        
-        # Save regular checkpoint
-        if (epoch + 1) % args.save_interval == 0:
-            # Save ST-NPP model
-            stnpp_path = os.path.join(args.output_dir, f"stnpp_epoch_{epoch+1}.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': stnpp.state_dict(),
-                'loss': avg_loss
-            }, stnpp_path)
-            
-            # Save QAL model
-            qal_path = os.path.join(args.output_dir, f"qal_epoch_{epoch+1}.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': qal.state_dict(),
-                'loss': avg_loss
-            }, qal_path)
-            
-            print(f"Saved checkpoints to {stnpp_path} and {qal_path}")
-    
-    # Save final models
-    stnpp_final_path = os.path.join(args.output_dir, "stnpp_final.pt")
-    torch.save({
-        'epoch': args.epochs,
-        'model_state_dict': stnpp.state_dict(),
-        'loss': avg_loss
-    }, stnpp_final_path)
-    
-    qal_final_path = os.path.join(args.output_dir, "qal_final.pt")
-    torch.save({
-        'epoch': args.epochs,
-        'model_state_dict': qal.state_dict(),
-        'loss': avg_loss
-    }, qal_final_path)
-    
-    # Save combined model
-    combined_path = os.path.join(args.output_dir, "stnpp_qal_model.pt")
-    torch.save({
-        'epoch': args.epochs,
-        'stnpp_state_dict': stnpp.state_dict(),
-        'qal_state_dict': qal.state_dict(),
-        'loss': avg_loss
-    }, combined_path)
-    
-    print(f"Saved final models to {stnpp_final_path}, {qal_final_path}, and {combined_path}")
-    print("Training completed!")
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train ST-NPP module with QAL")
+    parser = argparse.ArgumentParser(description='Train ST-NPP and QAL models')
     
     # Dataset parameters
-    parser.add_argument("--dataset_path", type=str, required=True,
-                        help="Path to the video dataset")
-    parser.add_argument("--time_steps", type=int, default=16,
-                        help="Number of frames in each sequence")
-    parser.add_argument("--frame_stride", type=int, default=4,
-                        help="Stride for frame sampling")
-    parser.add_argument("--max_videos", type=int, default=None,
-                        help="Maximum number of videos to load (for debugging)")
+    parser.add_argument('--dataset', type=str, required=True,
+                        help='Path to video dataset')
+    parser.add_argument('--val_dataset', type=str, default=None,
+                        help='Path to validation dataset (if None, uses a portion of training data)')
     
     # Model parameters
-    parser.add_argument("--spatial_backbone", type=str, default="resnet50",
-                        choices=["resnet34", "resnet50", "efficientnet_b4"],
-                        help="Backbone for the spatial branch")
-    parser.add_argument("--temporal_model", type=str, default="3dcnn",
-                        choices=["3dcnn", "convlstm"],
-                        help="Model for the temporal branch")
-    parser.add_argument("--fusion_type", type=str, default="concatenation",
-                        choices=["concatenation", "attention"],
-                        help="Type of fusion for spatial and temporal features")
-    parser.add_argument("--proxy_model_path", type=str, default=None,
-                        help="Path to the pre-trained proxy network model")
+    parser.add_argument('--stnpp_backbone', type=str, default='resnet18',
+                        help='Backbone CNN for spatial branch (resnet18, resnet34, resnet50)')
+    parser.add_argument('--temporal_model', type=str, default='3dcnn',
+                        help='Temporal model type (3dcnn, convlstm)')
+    parser.add_argument('--qal_type', type=str, default='standard',
+                        help='QAL type (standard, conditional, pixelwise)')
     
     # Training parameters
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Batch size for training")
-    parser.add_argument("--epochs", type=int, default=150,
-                        help="Number of epochs for training")
-    parser.add_argument("--lr", type=float, default=0.00005,
-                        help="Learning rate for optimizer")
-    parser.add_argument("--num_workers", type=int, default=4,
-                        help="Number of workers for data loading")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility")
-    
-    # Loss parameters
-    parser.add_argument("--lambda_value", type=float, default=0.1,
-                        help="Weight for the distortion term in the proxy loss")
-    parser.add_argument("--recon_weight", type=float, default=0.5,
-                        help="Weight for the reconstruction loss")
-    parser.add_argument("--use_ssim", action="store_true",
-                        help="Use SSIM instead of MSE for distortion measurement")
-    parser.add_argument("--min_qp", type=int, default=22,
-                        help="Minimum QP value for training")
-    parser.add_argument("--max_qp", type=int, default=37,
-                        help="Maximum QP value for training")
+    parser.add_argument('--batch_size', type=int, default=8,
+                        help='Batch size for training')
+    parser.add_argument('--epochs', type=int, default=50,
+                        help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=1e-4,
+                        help='Learning rate')
+    parser.add_argument('--qp_values', type=str, default='22,27,32,37',
+                        help='Comma-separated list of QP values to train with')
+    parser.add_argument('--lambda_value', type=float, default=0.1,
+                        help='Lambda for rate-distortion tradeoff')
     
     # Output parameters
-    parser.add_argument("--output_dir", type=str, default="trained_models",
-                        help="Directory to save the trained models")
-    parser.add_argument("--save_interval", type=int, default=10,
-                        help="Epoch interval for saving checkpoints")
+    parser.add_argument('--output_dir', type=str, default='./trained_models',
+                        help='Directory to save trained models')
+    parser.add_argument('--stnpp_dir', type=str, default='stnpp',
+                        help='Subdirectory for ST-NPP models')
+    parser.add_argument('--qal_dir', type=str, default='qal',
+                        help='Subdirectory for QAL models')
+    parser.add_argument('--log_dir', type=str, default='./logs',
+                        help='Directory for TensorBoard logs')
+    parser.add_argument('--save_interval', type=int, default=5,
+                        help='Save models every N epochs')
+    
+    # Other parameters
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='Number of worker threads for data loading')
+    parser.add_argument('--resume_stnpp', type=str, default=None,
+                        help='Path to ST-NPP model to resume training')
+    parser.add_argument('--resume_qal', type=str, default=None,
+                        help='Path to QAL model to resume training')
     
     return parser.parse_args()
+
+
+def set_seed(seed):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+class RDLoss(nn.Module):
+    """
+    Rate-Distortion Loss module.
+    
+    Combines distortion loss (MSE) with rate penalty.
+    """
+    def __init__(self, lambda_value=0.1):
+        super(RDLoss, self).__init__()
+        self.lambda_value = lambda_value
+        self.mse_loss = nn.MSELoss()
+        
+    def forward(self, original, processed, estimated_rate=None):
+        # Distortion loss
+        distortion_loss = self.mse_loss(original, processed)
+        
+        # Rate loss (if provided)
+        if estimated_rate is not None:
+            return distortion_loss + self.lambda_value * estimated_rate
+        
+        return distortion_loss
+
+
+def train(args):
+    """Main training function."""
+    # Set random seed
+    set_seed(args.seed)
+    
+    # Create output directories
+    stnpp_output_dir = os.path.join(args.output_dir, args.stnpp_dir)
+    qal_output_dir = os.path.join(args.output_dir, args.qal_dir)
+    os.makedirs(stnpp_output_dir, exist_ok=True)
+    os.makedirs(qal_output_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
+    
+    # Set up TensorBoard
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_dir = os.path.join(args.log_dir, f'stnpp_training_{timestamp}')
+    writer = SummaryWriter(log_dir=log_dir)
+    
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Initialize models
+    stnpp_model = STNPP(
+        backbone=args.stnpp_backbone,
+        temporal_model=args.temporal_model
+    ).to(device)
+    
+    qal_model = QAL(
+        qal_type=args.qal_type
+    ).to(device)
+    
+    # Set up optimizers
+    stnpp_optimizer = optim.Adam(stnpp_model.parameters(), lr=args.lr)
+    qal_optimizer = optim.Adam(qal_model.parameters(), lr=args.lr)
+    
+    # Learning rate schedulers
+    stnpp_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        stnpp_optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
+    qal_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        qal_optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
+    
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    best_val_loss = float('inf')
+    
+    if args.resume_stnpp:
+        print(f"Resuming ST-NPP from checkpoint: {args.resume_stnpp}")
+        stnpp_model, metadata = load_model_with_version(
+            stnpp_model, args.resume_stnpp, device, stnpp_optimizer
+        )
+        if 'epoch' in metadata:
+            start_epoch = metadata['epoch']
+        if 'metrics' in metadata and 'val_loss' in metadata['metrics']:
+            best_val_loss = metadata['metrics']['val_loss']
+    
+    if args.resume_qal:
+        print(f"Resuming QAL from checkpoint: {args.resume_qal}")
+        qal_model, _ = load_model_with_version(
+            qal_model, args.resume_qal, device, qal_optimizer
+        )
+    
+    # Parse QP values
+    qp_values = [int(qp) for qp in args.qp_values.split(',')]
+    
+    # Set up datasets and dataloaders
+    train_dataset = VideoDataset(args.dataset)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers
+    )
+    
+    if args.val_dataset:
+        val_dataset = VideoDataset(args.val_dataset)
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers
+        )
+    else:
+        # Use a portion of training data for validation
+        train_size = int(0.8 * len(train_dataset))
+        val_size = len(train_dataset) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            train_dataset, [train_size, val_size]
+        )
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers
+        )
+    
+    # Set up loss function
+    criterion = RDLoss(lambda_value=args.lambda_value)
+    
+    # Training loop
+    print(f"Starting training for {args.epochs} epochs...")
+    
+    for epoch in range(start_epoch, args.epochs):
+        print(f"Epoch {epoch+1}/{args.epochs}")
+        
+        # Training phase
+        stnpp_model.train()
+        qal_model.train()
+        train_loss = 0.0
+        train_start_time = time.time()
+        
+        for batch_idx, batch in enumerate(train_loader):
+            frames = batch['frames'].to(device)
+            
+            # Choose a random QP for this batch
+            qp = random.choice(qp_values)
+            
+            # Forward pass through ST-NPP
+            preprocessed_frames = stnpp_model(frames)
+            
+            # Forward pass through QAL with the chosen QP
+            reconstructed_frames = qal_model(preprocessed_frames, qp)
+            
+            # Calculate loss
+            loss = criterion(frames, reconstructed_frames)
+            
+            # Backward pass and optimization
+            stnpp_optimizer.zero_grad()
+            qal_optimizer.zero_grad()
+            loss.backward()
+            stnpp_optimizer.step()
+            qal_optimizer.step()
+            
+            # Accumulate loss
+            train_loss += loss.item() * frames.size(0)
+            
+            # Log progress
+            if (batch_idx + 1) % 10 == 0:
+                print(f"Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.6f}")
+                
+                # Log to TensorBoard
+                global_step = epoch * len(train_loader) + batch_idx
+                writer.add_scalar('train/loss', loss.item(), global_step)
+                writer.add_scalar('train/stnpp_lr', stnpp_optimizer.param_groups[0]['lr'], global_step)
+                writer.add_scalar('train/qal_lr', qal_optimizer.param_groups[0]['lr'], global_step)
+                
+                # Add sample images periodically
+                if batch_idx % 50 == 0:
+                    # Original frame
+                    writer.add_image('train/original', frames[0].cpu(), global_step)
+                    # Preprocessed frame
+                    writer.add_image('train/preprocessed', preprocessed_frames[0].cpu(), global_step)
+                    # Reconstructed frame
+                    writer.add_image('train/reconstructed', reconstructed_frames[0].cpu(), global_step)
+                    # Add histograms for model parameters
+                    for name, param in stnpp_model.named_parameters():
+                        if param.requires_grad:
+                            writer.add_histogram(f'stnpp/{name}', param.data.cpu().numpy(), global_step)
+                    for name, param in qal_model.named_parameters():
+                        if param.requires_grad:
+                            writer.add_histogram(f'qal/{name}', param.data.cpu().numpy(), global_step)
+        
+        # Calculate average training loss
+        avg_train_loss = train_loss / len(train_dataset)
+        train_time = time.time() - train_start_time
+        print(f"Training Loss: {avg_train_loss:.6f}, Time: {train_time:.2f}s")
+        
+        # Validation phase
+        stnpp_model.eval()
+        qal_model.eval()
+        val_loss = 0.0
+        val_start_time = time.time()
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(val_loader):
+                frames = batch['frames'].to(device)
+                
+                # Evaluate on all QP values
+                batch_loss = 0
+                for qp in qp_values:
+                    # Forward pass through ST-NPP
+                    preprocessed_frames = stnpp_model(frames)
+                    
+                    # Forward pass through QAL with the current QP
+                    reconstructed_frames = qal_model(preprocessed_frames, qp)
+                    
+                    # Calculate loss
+                    loss = criterion(frames, reconstructed_frames)
+                    batch_loss += loss.item()
+                
+                # Average loss across QPs
+                batch_loss /= len(qp_values)
+                val_loss += batch_loss * frames.size(0)
+        
+        # Calculate average validation loss
+        avg_val_loss = val_loss / len(val_dataset)
+        val_time = time.time() - val_start_time
+        print(f"Validation Loss: {avg_val_loss:.6f}, Time: {val_time:.2f}s")
+        
+        # Log validation metrics to TensorBoard
+        writer.add_scalar('validation/loss', avg_val_loss, epoch)
+        
+        # Update learning rate schedulers
+        stnpp_scheduler.step(avg_val_loss)
+        qal_scheduler.step(avg_val_loss)
+        
+        # Save models periodically
+        if (epoch + 1) % args.save_interval == 0:
+            # Save ST-NPP model
+            stnpp_path = save_model_with_version(
+                stnpp_model,
+                stnpp_output_dir,
+                "stnpp",
+                optimizer=None,  # Don't save optimizer for intermediate checkpoints
+                epoch=epoch + 1,
+                metrics={"val_loss": avg_val_loss},
+                version=f"{timestamp}_e{epoch+1}"
+            )
+            
+            # Save QAL model
+            qal_path = save_model_with_version(
+                qal_model,
+                qal_output_dir,
+                "qal",
+                optimizer=None,  # Don't save optimizer for intermediate checkpoints
+                epoch=epoch + 1,
+                metrics={"val_loss": avg_val_loss},
+                version=f"{timestamp}_e{epoch+1}"
+            )
+            
+            print(f"Saved model checkpoints to {stnpp_path} and {qal_path}")
+        
+        # Save best models
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            
+            # Save best ST-NPP model
+            best_stnpp_path = save_model_with_version(
+                stnpp_model,
+                stnpp_output_dir,
+                "stnpp_best",
+                optimizer=stnpp_optimizer,
+                epoch=epoch + 1,
+                metrics={"val_loss": best_val_loss},
+                version=timestamp
+            )
+            
+            # Save best QAL model
+            best_qal_path = save_model_with_version(
+                qal_model,
+                qal_output_dir,
+                "qal_best",
+                optimizer=qal_optimizer,
+                epoch=epoch + 1,
+                metrics={"val_loss": best_val_loss},
+                version=timestamp
+            )
+            
+            print(f"New best models saved to {best_stnpp_path} and {best_qal_path}")
+    
+    # Save final models
+    final_stnpp_path = save_model_with_version(
+        stnpp_model,
+        stnpp_output_dir,
+        "stnpp_final",
+        optimizer=stnpp_optimizer,
+        epoch=args.epochs,
+        metrics={"val_loss": avg_val_loss},
+        version=timestamp
+    )
+    
+    final_qal_path = save_model_with_version(
+        qal_model,
+        qal_output_dir,
+        "qal_final",
+        optimizer=qal_optimizer,
+        epoch=args.epochs,
+        metrics={"val_loss": avg_val_loss},
+        version=timestamp
+    )
+    
+    print(f"Training completed. Final models saved to {final_stnpp_path} and {final_qal_path}")
+    writer.close()
+    
+    return {
+        "best_stnpp_model": best_stnpp_path if 'best_stnpp_path' in locals() else None,
+        "best_qal_model": best_qal_path if 'best_qal_path' in locals() else None,
+        "final_stnpp_model": final_stnpp_path,
+        "final_qal_model": final_qal_path,
+        "best_val_loss": best_val_loss,
+        "final_val_loss": avg_val_loss,
+        "log_dir": log_dir
+    }
 
 
 if __name__ == "__main__":

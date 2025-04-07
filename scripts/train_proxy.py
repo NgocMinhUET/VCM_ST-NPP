@@ -21,12 +21,17 @@ from pathlib import Path
 import cv2
 import subprocess
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.proxy_network import ProxyNetwork
 from models.stnpp import STNPP
+from utils.codec_utils import HevcCodec
+from utils.video_utils import VideoDataset, VideoFrameDataset
+from utils.model_utils import save_model_with_version, get_latest_model
 
 # Import our MOT dataset
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -210,16 +215,95 @@ def hevc_encode_decode(frames, qp, temp_dir=None):
     return decoded_frames
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train Proxy Network")
+    
+    # Dataset parameters
+    parser.add_argument("--dataset_path", type=str, required=True,
+                        help="Path to the video dataset or MOT16 dataset directory")
+    parser.add_argument("--time_steps", type=int, default=16,
+                        help="Number of frames in each sequence")
+    parser.add_argument("--frame_stride", type=int, default=4,
+                        help="Stride for frame sampling")
+    parser.add_argument("--max_videos", type=int, default=None,
+                        help="Maximum number of videos to load (for debugging)")
+    parser.add_argument("--use_mot_dataset", action="store_true",
+                        help="Use MOT16 dataset format instead of video files")
+    parser.add_argument("--split", type=str, default="train",
+                        help="Dataset split to use when using MOT16 (train or test)")
+    
+    # Model parameters
+    parser.add_argument("--lambda_value", type=float, default=0.1,
+                        help="Weight for the distortion term in the proxy loss")
+    parser.add_argument("--use_ssim", action="store_true",
+                        help="Use SSIM instead of MSE for distortion measurement")
+    
+    # Training parameters
+    parser.add_argument("--batch_size", type=int, default=8,
+                        help="Batch size for training")
+    parser.add_argument("--epochs", type=int, default=100,
+                        help="Number of epochs for training")
+    parser.add_argument("--lr", type=float, default=0.0001,
+                        help="Learning rate for optimizer")
+    parser.add_argument("--codec_interval", type=int, default=10,
+                        help="Interval for running the actual codec (slower)")
+    parser.add_argument("--num_workers", type=int, default=4,
+                        help="Number of workers for data loading")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
+    
+    # Output parameters
+    parser.add_argument("--output_dir", type=str, default="trained_models",
+                        help="Directory to save the trained model")
+    parser.add_argument("--save_interval", type=int, default=10,
+                        help="Epoch interval for saving checkpoints")
+    
+    # HEVC parameters
+    parser.add_argument("--qp", type=int, default=27,
+                        help="Quantization Parameter for HEVC codec")
+    
+    # Additional model parameters
+    parser.add_argument("--backbone", type=str, default="resnet34",
+                        help="Backbone network for ST-NPP (resnet50, resnet34, efficientnet_b4)")
+    parser.add_argument("--temporal_model", type=str, default="3dcnn",
+                        help="Temporal model for ST-NPP (3dcnn, convlstm)")
+    parser.add_argument("--fusion_type", type=str, default="concatenation",
+                        help="Fusion type for ST-NPP (concatenation, attention)")
+    parser.add_argument("--feature_channels", type=int, default=128,
+                        help="Number of feature channels for ST-NPP and proxy network")
+    parser.add_argument("--base_channels", type=int, default=64,
+                        help="Base channels for the proxy network")
+    parser.add_argument("--latent_channels", type=int, default=32,
+                        help="Latent channels for the proxy network")
+    parser.add_argument("--amp", action="store_true",
+                        help="Use mixed precision training")
+    
+    # TensorBoard parameters
+    parser.add_argument("--log_dir", type=str, default="logs/proxy",
+                        help="Directory for TensorBoard logs")
+    parser.add_argument("--log_interval", type=int, default=10,
+                        help="Logging interval (batches)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to model to resume training")
+    
+    return parser.parse_args()
+
+
+def set_seed(seed):
+    """Set random seed for reproducibility."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
 def train(args):
     """Main training function."""
     # Set random seed for reproducibility
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(args.seed)
-            torch.cuda.manual_seed_all(args.seed)
+    set_seed(args.seed)
     
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -231,6 +315,11 @@ def train(args):
     # Create temporary directory for codec operations
     temp_dir = os.path.join(args.output_dir, "temp_codec")
     os.makedirs(temp_dir, exist_ok=True)
+    
+    # Set up TensorBoard
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_dir = os.path.join(args.log_dir, f'proxy_training_{timestamp}')
+    writer = SummaryWriter(log_dir=log_dir)
     
     # Initialize ST-NPP model (for feature extraction)
     print("Initializing ST-NPP model...")
@@ -294,10 +383,20 @@ def train(args):
         pin_memory=True
     )
     
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    best_val_loss = float('inf')
+    if args.resume:
+        print(f"Resuming from checkpoint: {args.resume}")
+        proxy_net, metadata = get_latest_model(proxy_net, args.resume, device, optimizer)
+        if 'epoch' in metadata:
+            start_epoch = metadata['epoch']
+        if 'metrics' in metadata and 'val_loss' in metadata['metrics']:
+            best_val_loss = metadata['metrics']['val_loss']
+    
     # Training loop
     print("Starting training...")
-    best_loss = float('inf')
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         start_time = time.time()
         total_loss = 0.0
         total_rate = 0.0
@@ -386,43 +485,50 @@ def train(args):
               f"Distortion: {avg_distortion:.4f}, "
               f"Time: {elapsed_time:.2f}s")
         
+        # Log to TensorBoard
+        global_step = epoch * len(dataloader)
+        writer.add_scalar('train/loss', avg_loss, global_step)
+        writer.add_scalar('train/rate', avg_rate, global_step)
+        writer.add_scalar('train/distortion', avg_distortion, global_step)
+        writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], global_step)
+        
         # Save checkpoint if this is the best model so far
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            checkpoint_path = os.path.join(args.output_dir, "proxy_network_best.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': proxy_net.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': best_loss,
-                'rate': avg_rate,
-                'distortion': avg_distortion
-            }, checkpoint_path)
+        if avg_loss < best_val_loss:
+            best_val_loss = avg_loss
+            checkpoint_path = save_model_with_version(
+                proxy_net,
+                args.output_dir,
+                "proxy_network_best",
+                optimizer=optimizer,
+                epoch=epoch + 1,
+                metrics={"val_loss": best_val_loss},
+                version=timestamp
+            )
             print(f"Saved best model checkpoint to {checkpoint_path}")
         
         # Save regular checkpoint
         if (epoch + 1) % args.save_interval == 0:
-            checkpoint_path = os.path.join(args.output_dir, f"proxy_network_epoch_{epoch+1}.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': proxy_net.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_loss,
-                'rate': avg_rate,
-                'distortion': avg_distortion
-            }, checkpoint_path)
+            checkpoint_path = save_model_with_version(
+                proxy_net,
+                args.output_dir,
+                f"proxy_network_epoch_{epoch+1}",
+                optimizer=optimizer,
+                epoch=epoch + 1,
+                metrics={"val_loss": avg_loss},
+                version=timestamp
+            )
             print(f"Saved checkpoint to {checkpoint_path}")
     
     # Save final model
-    final_path = os.path.join(args.output_dir, "proxy_network_final.pt")
-    torch.save({
-        'epoch': args.epochs,
-        'model_state_dict': proxy_net.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': avg_loss,
-        'rate': avg_rate,
-        'distortion': avg_distortion
-    }, final_path)
+    final_path = save_model_with_version(
+        proxy_net,
+        args.output_dir,
+        "proxy_network_final",
+        optimizer=optimizer,
+        epoch=args.epochs,
+        metrics={"val_loss": avg_loss},
+        version=timestamp
+    )
     print(f"Saved final model to {final_path}")
     
     # Clean up
@@ -431,72 +537,15 @@ def train(args):
         shutil.rmtree(temp_dir)
     
     print("Training completed!")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train Proxy Network")
+    writer.close()
     
-    # Dataset parameters
-    parser.add_argument("--dataset_path", type=str, required=True,
-                        help="Path to the video dataset or MOT16 dataset directory")
-    parser.add_argument("--time_steps", type=int, default=16,
-                        help="Number of frames in each sequence")
-    parser.add_argument("--frame_stride", type=int, default=4,
-                        help="Stride for frame sampling")
-    parser.add_argument("--max_videos", type=int, default=None,
-                        help="Maximum number of videos to load (for debugging)")
-    parser.add_argument("--use_mot_dataset", action="store_true",
-                        help="Use MOT16 dataset format instead of video files")
-    parser.add_argument("--split", type=str, default="train",
-                        help="Dataset split to use when using MOT16 (train or test)")
-    
-    # Model parameters
-    parser.add_argument("--lambda_value", type=float, default=0.1,
-                        help="Weight for the distortion term in the proxy loss")
-    parser.add_argument("--use_ssim", action="store_true",
-                        help="Use SSIM instead of MSE for distortion measurement")
-    
-    # Training parameters
-    parser.add_argument("--batch_size", type=int, default=8,
-                        help="Batch size for training")
-    parser.add_argument("--epochs", type=int, default=100,
-                        help="Number of epochs for training")
-    parser.add_argument("--lr", type=float, default=0.0001,
-                        help="Learning rate for optimizer")
-    parser.add_argument("--codec_interval", type=int, default=10,
-                        help="Interval for running the actual codec (slower)")
-    parser.add_argument("--num_workers", type=int, default=4,
-                        help="Number of workers for data loading")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility")
-    
-    # Output parameters
-    parser.add_argument("--output_dir", type=str, default="trained_models",
-                        help="Directory to save the trained model")
-    parser.add_argument("--save_interval", type=int, default=10,
-                        help="Epoch interval for saving checkpoints")
-    
-    # HEVC parameters
-    parser.add_argument("--qp", type=int, default=27,
-                        help="Quantization Parameter for HEVC codec")
-    
-    # Additional model parameters
-    parser.add_argument("--backbone", type=str, default="resnet34",
-                        help="Backbone network for ST-NPP (resnet50, resnet34, efficientnet_b4)")
-    parser.add_argument("--temporal_model", type=str, default="3dcnn",
-                        help="Temporal model for ST-NPP (3dcnn, convlstm)")
-    parser.add_argument("--fusion_type", type=str, default="concatenation",
-                        help="Fusion type for ST-NPP (concatenation, attention)")
-    parser.add_argument("--feature_channels", type=int, default=128,
-                        help="Number of feature channels for ST-NPP and proxy network")
-    parser.add_argument("--base_channels", type=int, default=64,
-                        help="Base channels for the proxy network")
-    parser.add_argument("--latent_channels", type=int, default=32,
-                        help="Latent channels for the proxy network")
-    parser.add_argument("--amp", action="store_true",
-                        help="Use mixed precision training")
-    
-    return parser.parse_args()
+    return {
+        "best_model": checkpoint_path if 'checkpoint_path' in locals() else None,
+        "final_model": final_path,
+        "best_val_loss": best_val_loss,
+        "final_val_loss": avg_loss,
+        "log_dir": log_dir
+    }
 
 
 if __name__ == "__main__":
