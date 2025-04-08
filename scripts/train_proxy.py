@@ -152,9 +152,11 @@ def hevc_encode_decode(frames, qp, temp_dir=None):
         Decoded frames tensor (T, C, H, W)
     """
     if temp_dir is None:
-        temp_dir = Path('temp_codec')
+        temp_dir = Path('trained_models/proxy/temp_codec')
     
+    # Ensure temp directory exists with proper permissions
     os.makedirs(temp_dir, exist_ok=True)
+    os.chmod(temp_dir, 0o777)  # Give full permissions
     
     # Convert frames to numpy and back to [0, 255] range
     frames_np = frames.permute(0, 2, 3, 1).cpu().numpy() * 255.0
@@ -185,7 +187,10 @@ def hevc_encode_decode(frames, qp, temp_dir=None):
         "-c:v", "libx265", "-preset", "medium",
         "-x265-params", f"qp={qp}", str(encoded_path)
     ]
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print(f"FFmpeg encode error: {result.stderr.decode()}")
+        raise RuntimeError("FFmpeg encoding failed")
     
     # Decode back to YUV
     decoded_yuv_path = os.path.join(temp_dir, "decoded.yuv")
@@ -195,7 +200,10 @@ def hevc_encode_decode(frames, qp, temp_dir=None):
         "-c:v", "rawvideo", "-pix_fmt", "yuv420p",
         str(decoded_yuv_path)
     ]
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print(f"FFmpeg decode error: {result.stderr.decode()}")
+        raise RuntimeError("FFmpeg decoding failed")
     
     # Read decoded YUV back to tensors
     frame_size = width * height * 3 // 2  # YUV420 uses 1.5 bytes per pixel
