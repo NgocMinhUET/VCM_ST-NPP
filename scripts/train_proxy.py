@@ -163,12 +163,12 @@ def hevc_encode_decode(frames, qp, temp_dir=None):
     # Save frames as PNG files (lossless)
     frame_paths = []
     for i, frame in enumerate(frames_np):
-        frame_path = temp_dir / f"frame_{i:04d}.png"
+        frame_path = os.path.join(temp_dir, f"frame_{i:04d}.png")
         cv2.imwrite(str(frame_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
         frame_paths.append(frame_path)
     
     # Create YUV file from frames
-    yuv_path = temp_dir / "temp.yuv"
+    yuv_path = os.path.join(temp_dir, "temp.yuv")
     with open(yuv_path, 'wb') as yuv_file:
         for frame_path in frame_paths:
             img = cv2.imread(str(frame_path))
@@ -177,7 +177,7 @@ def hevc_encode_decode(frames, qp, temp_dir=None):
     
     # Encode with HEVC
     height, width = frames_np.shape[1:3]
-    encoded_path = temp_dir / "encoded.hevc"
+    encoded_path = os.path.join(temp_dir, "encoded.hevc")
     cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo", "-pix_fmt", "yuv420p",
@@ -188,7 +188,7 @@ def hevc_encode_decode(frames, qp, temp_dir=None):
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
     # Decode back to YUV
-    decoded_yuv_path = temp_dir / "decoded.yuv"
+    decoded_yuv_path = os.path.join(temp_dir, "decoded.yuv")
     cmd = [
         "ffmpeg", "-y",
         "-i", str(encoded_path),

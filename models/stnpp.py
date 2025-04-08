@@ -280,19 +280,20 @@ class TemporalBranchConvLSTM(nn.Module):
 
 class ConcatenationFusion(nn.Module):
     """
-    Fusion module using concatenation and 3D convolutions.
+    Fusion module using concatenation.
     
-    This module fuses spatial and temporal features through concatenation and 3D convolutions.
+    This module fuses spatial and temporal features through concatenation.
     """
     
     def __init__(self, spatial_channels: int = 128, temporal_channels: int = 128, 
                  output_channels: int = 128):
         super(ConcatenationFusion, self).__init__()
         
-        self.conv = Conv3DBlock(
-            spatial_channels + temporal_channels, 
-            output_channels
-        )
+        # Compute input channels after concatenation
+        total_channels = spatial_channels + temporal_channels
+        
+        # 3D convolution to reduce channel dimensions
+        self.conv = nn.Conv3d(total_channels, output_channels, kernel_size=1)
         
     def forward(self, spatial_features: torch.Tensor, temporal_features: torch.Tensor) -> torch.Tensor:
         """
@@ -305,18 +306,55 @@ class ConcatenationFusion(nn.Module):
         Returns:
             Fused features of shape (B, output_channels, T, H, W)
         """
+        # Debugging: Print the shapes of input tensors
+        print(f"DEBUG - spatial_features shape: {spatial_features.shape}")
+        print(f"DEBUG - temporal_features shape: {temporal_features.shape}")
+        
         # Handle case where spatial features are for a single frame
         if len(spatial_features.shape) == 4:
             B, C, H, W = spatial_features.shape
-            _, _, T, _, _ = temporal_features.shape
+            _, C_t, T, Ht, Wt = temporal_features.shape
             spatial_features = spatial_features.unsqueeze(1).expand(-1, T, -1, -1, -1)
-            
+            print(f"DEBUG - expanded spatial_features shape: {spatial_features.shape}")
+        
+        # Get dimensions from temporal features
+        B, C_t, T, H, W = temporal_features.shape
+        
         # Reshape spatial features to match temporal dimensions
-        B, T, C_s, H, W = spatial_features.shape
-        spatial_features = spatial_features.permute(0, 2, 1, 3, 4)  # (B, C_s, T, H, W)
+        if len(spatial_features.shape) == 5:
+            B_s, T_s, C_s, H_s, W_s = spatial_features.shape
+            
+            # Ensure time dimension matches
+            if T_s != T:
+                # If time dimensions don't match, resize to match temporal features
+                spatial_features = F.interpolate(
+                    spatial_features.permute(0, 2, 1, 3, 4),  # (B, C, T, H, W)
+                    size=(T, H_s, W_s),
+                    mode='trilinear',
+                    align_corners=False
+                )
+                print(f"DEBUG - interpolated spatial_features shape: {spatial_features.shape}")
+            else:
+                # Just permute to match the format
+                spatial_features = spatial_features.permute(0, 2, 1, 3, 4)  # (B, C_s, T, H, W)
+        
+        # Final debug print before concatenation
+        print(f"DEBUG - final spatial_features shape: {spatial_features.shape}")
+        print(f"DEBUG - final temporal_features shape: {temporal_features.shape}")
+        
+        # Ensure spatial dimensions match
+        if spatial_features.shape[3:] != temporal_features.shape[3:]:
+            spatial_features = F.interpolate(
+                spatial_features,
+                size=temporal_features.shape[2:],  # (T, H, W)
+                mode='trilinear',
+                align_corners=False
+            )
+            print(f"DEBUG - resized spatial_features shape: {spatial_features.shape}")
         
         # Concatenate along channel dimension
         fused = torch.cat([spatial_features, temporal_features], dim=1)
+        print(f"DEBUG - fused shape: {fused.shape}")
         
         # Apply 3D convolution
         fused = self.conv(fused)

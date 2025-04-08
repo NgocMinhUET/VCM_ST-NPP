@@ -120,7 +120,7 @@ The training process follows three main stages:
 
 ```bash
 python scripts/train_proxy.py \
-  --dataset datasets/MOTChallenge/processed \
+  --dataset datasets/MOTChallenge/processed --use_mot_dataset \
   --batch_size 8 \
   --epochs 50 \
   --learning_rate 1e-4 \
