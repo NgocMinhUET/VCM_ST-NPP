@@ -18,6 +18,7 @@ import cv2
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
+import torch.nn.functional as F
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,7 +32,7 @@ from utils.model_utils import save_model_with_version, load_model_with_version
 class VideoDataset(Dataset):
     """Dataset for loading video sequences or image sequences."""
     
-    def __init__(self, dataset_path, time_steps=16, transform=None, max_videos=None, frame_stride=4):
+    def __init__(self, dataset_path, time_steps=16, frame_stride=1, transform=None, max_videos=None):
         """
         Initialize the VideoDataset.
         
@@ -44,14 +45,11 @@ class VideoDataset(Dataset):
         """
         self.dataset_path = Path(dataset_path)
         self.time_steps = time_steps
-        self.transform = transform
         self.frame_stride = frame_stride
+        self.transform = transform
         
-        # Check if this is an image sequence dataset (like MOT16)
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
-        is_image_sequence = False
-        
-        # Check for image sequences first
+        # Image file extensions to look for
+        image_extensions = ['.jpg', '.jpeg', '.png']
         image_files = []
         for ext in image_extensions:
             image_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
@@ -71,61 +69,64 @@ class VideoDataset(Dataset):
             # Limit the number of videos if specified
             if max_videos is not None:
                 self.video_files = self.video_files[:max_videos]
-                
+            
             # Check if any video files were found
             if len(self.video_files) == 0:
-                raise ValueError(f"No video files or image sequences found in {dataset_path}. "
-                                f"Make sure the path exists and contains video files with extensions: {video_extensions} "
-                                f"or image files with extensions: {image_extensions}")
+                raise ValueError(f"No video files or image sequences found in {dataset_path}.")
             
             # Extract frames from videos and create sequences
             self.sequences = []
             for video_file in tqdm(self.video_files, desc="Loading videos"):
                 self._extract_video_sequences(video_file)
         
-        # Check if any sequences were created
-        if len(self.sequences) == 0:
-            raise ValueError(f"No valid sequences could be created from the data in {dataset_path}. "
-                            f"Check that the videos/images have at least {time_steps} frames and are readable.")
-        
         print(f"Created {len(self.sequences)} sequences")
     
     def _extract_image_sequences(self, image_files):
         """Extract frame sequences from image files."""
+        sequences = []
+        current_sequence = []
+        prev_dir = None
+        
         # Sort image files to ensure proper sequence
         image_files = sorted(image_files)
         
-        # Group images by directory (each directory is typically a different sequence)
-        sequences = {}
         for img_file in image_files:
-            # Use parent directory as sequence key
-            seq_key = str(img_file.parent)
-            if seq_key not in sequences:
-                sequences[seq_key] = []
+            current_dir = img_file.parent
+            
+            # Start new sequence if directory changes
+            if prev_dir is not None and current_dir != prev_dir:
+                if len(current_sequence) >= self.time_steps:
+                    sequences.extend(self._create_subsequences(current_sequence))
+                current_sequence = []
             
             # Load and preprocess image
             img = cv2.imread(str(img_file))
             if img is not None:
-                # Convert BGR to RGB
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                
-                # Resize to a fixed size for consistency
                 img = cv2.resize(img, (224, 224))
-                
-                # Normalize to [0, 1]
                 img = img.astype(np.float32) / 255.0
-                
-                sequences[seq_key].append(img)
+                current_sequence.append(img)
+            
+            prev_dir = current_dir
+            
+            # Process sequence if it's long enough
+            if len(current_sequence) >= self.time_steps * 2:
+                sequences.extend(self._create_subsequences(current_sequence))
+                current_sequence = current_sequence[-self.time_steps:]  # Keep last sequence for overlap
         
-        # Create time_steps sequences with stride
-        final_sequences = []
-        for seq_name, frames in sequences.items():
-            if len(frames) >= self.time_steps:
-                for i in range(0, len(frames) - self.time_steps + 1, self.frame_stride):
-                    sequence = frames[i:i + self.time_steps]
-                    final_sequences.append(sequence)
+        # Process remaining sequence
+        if len(current_sequence) >= self.time_steps:
+            sequences.extend(self._create_subsequences(current_sequence))
         
-        return final_sequences
+        return sequences
+    
+    def _create_subsequences(self, sequence):
+        """Create subsequences of length time_steps with stride."""
+        subsequences = []
+        for i in range(0, len(sequence) - self.time_steps + 1, self.frame_stride):
+            subsequence = sequence[i:i + self.time_steps]
+            subsequences.append(subsequence)
+        return subsequences
     
     def _extract_video_sequences(self, video_file):
         """Extract frame sequences from a video file."""
@@ -290,12 +291,10 @@ def train(args):
     print("Initializing ST-NPP model...")
     try:
         stnpp_model = STNPP(
-            input_channels=3,
-            output_channels=args.output_channels,
-            spatial_backbone=args.stnpp_backbone,
+            backbone=args.stnpp_backbone,
             temporal_model=args.temporal_model,
-            fusion_type=args.fusion_type,
-            pretrained=True
+            output_channels=args.output_channels,
+            fusion_type=args.fusion_type
         ).to(device)
     except Exception as e:
         print(f"Error initializing ST-NPP model: {e}")
@@ -396,6 +395,11 @@ def train(args):
     # Set up loss function
     criterion = RDLoss(lambda_value=args.lambda_value)
     
+    # Initialize memory tracking
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        start_memory = torch.cuda.memory_allocated()
+    
     # Training loop
     print(f"Starting training for {args.epochs} epochs...")
     
@@ -418,37 +422,59 @@ def train(args):
             # Create batch of QP values (one per batch item)
             qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
             
-            # Need to reshape frames for STNPP which expects [B, C, T, H, W]
-            frames_for_model = frames.permute(0, 2, 1, 3, 4)
+            # Add debug logging before processing
+            print(f"Input frames shape: {frames.shape}")
             
-            # Forward pass through ST-NPP (takes [B, C, T, H, W], returns [B, C, T, H/4, W/4])
-            preprocessed_frames = stnpp_model(frames_for_model)
+            # Process frames through ST-NPP model
+            with torch.cuda.amp.autocast():
+                # Move frames to device in chunks if needed
+                if frames.shape[0] > args.batch_size:
+                    print("Processing large batch in chunks...")
+                    reconstructed_frames = []
+                    for i in range(0, frames.shape[0], args.batch_size):
+                        chunk = frames[i:i+args.batch_size].to(device)
+                        with torch.no_grad():
+                            chunk_output = stnpp_model(chunk)
+                        reconstructed_frames.append(chunk_output.cpu())
+                        del chunk, chunk_output
+                        torch.cuda.empty_cache()
+                    reconstructed_frames = torch.cat(reconstructed_frames, dim=0)
+                else:
+                    reconstructed_frames = stnpp_model(frames)
             
-            # Forward pass through QAL with the current QP (returns [B, C, T, H/4, W/4])
-            reconstructed_frames = qal_model(preprocessed_frames, qp_tensor)
+            # Log memory usage
+            if torch.cuda.is_available():
+                peak_memory = torch.cuda.max_memory_allocated()
+                current_memory = torch.cuda.memory_allocated()
+                print(f"Peak memory usage: {peak_memory/1e9:.2f} GB")
+                print(f"Current memory usage: {current_memory/1e9:.2f} GB")
+                print(f"Memory increase: {(current_memory - start_memory)/1e9:.2f} GB")
             
-            # Now we need to make the reconstructed frames match the original frames format and size
-            # First get the original shape
-            B, T, C, H, W = frames.shape
-            
-            # 1. Permute reconstructed frames to match original frame dimensions order [B, T, C, H, W]
-            reconstructed_frames = reconstructed_frames.permute(0, 2, 1, 3, 4)
-            
-            # 2. Check if spatial dimensions need upsampling
-            if reconstructed_frames.shape[3:] != frames.shape[3:]:
-                # Reshape for F.interpolate: [B, T, C, H, W] -> [B*T, C, H, W]
-                reconstructed_frames = reconstructed_frames.reshape(-1, C, reconstructed_frames.shape[3], 
-                                                                  reconstructed_frames.shape[4])
+            # Ensure reconstructed frames have same dimensions as input
+            if reconstructed_frames.shape != frames.shape:
+                print("Resizing reconstructed frames to match input dimensions...")
+                B, T, C_out, H_out, W_out = reconstructed_frames.shape
                 
-                # Interpolate to match original size
-                reconstructed_frames = torch.nn.functional.interpolate(
-                    reconstructed_frames, size=(H, W), mode='bilinear', align_corners=False
-                )
+                # First reshape to [B*T, C, H, W] for interpolation
+                reconstructed_frames = reconstructed_frames.reshape(B*T, C_out, H_out, W_out)
+                
+                # Interpolate to match spatial dimensions
+                reconstructed_frames = F.interpolate(reconstructed_frames, 
+                                                  size=(frames.shape[3], frames.shape[4]),
+                                                  mode='bilinear',
+                                                  align_corners=False)
                 
                 # Reshape back to [B, T, C, H, W]
-                reconstructed_frames = reconstructed_frames.reshape(B, T, C, H, W)
+                reconstructed_frames = reconstructed_frames.reshape(B, T, C_out, frames.shape[3], frames.shape[4])
+                
+                # Adjust number of channels if needed
+                if C_out != frames.shape[2]:
+                    print(f"Adjusting channels from {C_out} to {frames.shape[2]}")
+                    reconstructed_frames = reconstructed_frames[:, :, :frames.shape[2], :, :]
             
-            # Now both frames and reconstructed_frames should have the same shape [B, T, C, H, W]
+            print(f"Final reconstructed shape: {reconstructed_frames.shape}")
+            
+            # Calculate loss
             loss = criterion(frames, reconstructed_frames)
             
             # Backward pass and optimization
@@ -479,16 +505,11 @@ def train(args):
                     
                     # Preprocessed frame - shape is [B, C, T, H, W]
                     # Need to take the first frame of first batch and convert to [C, H, W]
-                    preprocessed_img = preprocessed_frames[0, :, 0].cpu()
-                    
-                    # Reconstructed frame - shape is now [B, T, C, H, W] 
-                    # Need to take the first frame of first batch [0, 0] and convert to [C, H, W]
-                    reconstructed_img = reconstructed_frames[0, 0].cpu()
+                    preprocessed_img = reconstructed_frames[0, 0].cpu()
                     
                     # Add images to TensorBoard
                     writer.add_image('train/original', original_img, global_step)
                     writer.add_image('train/preprocessed', preprocessed_img, global_step)
-                    writer.add_image('train/reconstructed', reconstructed_img, global_step)
                     
                     # Add histograms for model parameters
                     for name, param in stnpp_model.named_parameters():
@@ -506,69 +527,16 @@ def train(args):
         # Validation phase
         stnpp_model.eval()
         qal_model.eval()
-        val_loss = 0.0
-        val_start_time = time.time()
-        
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(val_loader):
-                frames = batch['frames'].to(device)  # shape: [B, T, C, H, W]
-                
-                # Evaluate on all QP values
-                batch_loss = 0
-                for qp in qp_values:
-                    # Convert QP to tensor with proper shape
-                    # Create batch of QP values (one per batch item)
-                    qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
-                    
-                    # Need to reshape frames for STNPP which expects [B, C, T, H, W]
-                    frames_for_model = frames.permute(0, 2, 1, 3, 4)
-                    
-                    # Forward pass through ST-NPP (takes [B, C, T, H, W], returns [B, C, T, H/4, W/4])
-                    preprocessed_frames = stnpp_model(frames_for_model)
-                    
-                    # Forward pass through QAL with the current QP (returns [B, C, T, H/4, W/4])
-                    reconstructed_frames = qal_model(preprocessed_frames, qp_tensor)
-                    
-                    # Now we need to make the reconstructed frames match the original frames format and size
-                    # First get the original shape
-                    B, T, C, H, W = frames.shape
-                    
-                    # 1. Permute reconstructed frames to match original frame dimensions order [B, T, C, H, W]
-                    reconstructed_frames = reconstructed_frames.permute(0, 2, 1, 3, 4)
-                    
-                    # 2. Check if spatial dimensions need upsampling
-                    if reconstructed_frames.shape[3:] != frames.shape[3:]:
-                        # Reshape for F.interpolate: [B, T, C, H, W] -> [B*T, C, H, W]
-                        reconstructed_frames = reconstructed_frames.reshape(-1, C, reconstructed_frames.shape[3], 
-                                                                          reconstructed_frames.shape[4])
-                        
-                        # Interpolate to match original size
-                        reconstructed_frames = torch.nn.functional.interpolate(
-                            reconstructed_frames, size=(H, W), mode='bilinear', align_corners=False
-                        )
-                        
-                        # Reshape back to [B, T, C, H, W]
-                        reconstructed_frames = reconstructed_frames.reshape(B, T, C, H, W)
-                    
-                    # Now both frames and reconstructed_frames should have the same shape [B, T, C, H, W]
-                    loss = criterion(frames, reconstructed_frames)
-                    batch_loss += loss.item()
-                
-                # Average loss across QP values
-                batch_loss /= len(qp_values)
-                val_loss += batch_loss * frames.size(0)
-        
-        # Calculate average validation loss
-        avg_val_loss = val_loss / len(val_dataset)
-        val_time = time.time() - val_start_time
-        print(f"Validation Loss: {avg_val_loss:.6f}, Time: {val_time:.2f}s")
+        val_loss, avg_psnr, avg_ssim = evaluate(stnpp_model, val_loader, criterion, device, args)
         
         # Update learning rate schedulers
-        stnpp_scheduler.step(avg_val_loss)
-        qal_scheduler.step(avg_val_loss)
+        stnpp_scheduler.step(val_loss)
+        qal_scheduler.step(val_loss)
         
         # Log to TensorBoard
-        writer.add_scalar('val/loss', avg_val_loss, (epoch + 1) * len(train_loader))
+        writer.add_scalar('val/loss', val_loss, (epoch + 1) * len(train_loader))
+        writer.add_scalar('val/psnr', avg_psnr, (epoch + 1) * len(train_loader))
+        writer.add_scalar('val/ssim', avg_ssim, (epoch + 1) * len(train_loader))
         
         # Save models
         if (epoch + 1) % args.save_interval == 0 or (epoch + 1) == args.epochs:
@@ -578,7 +546,7 @@ def train(args):
                 f"stnpp_epoch_{epoch+1}",
                 optimizer=stnpp_optimizer,
                 epoch=epoch + 1,
-                metrics={"val_loss": avg_val_loss},
+                metrics={"val_loss": val_loss},
                 version=timestamp
             )
             qal_path = save_model_with_version(
@@ -587,21 +555,21 @@ def train(args):
                 f"qal_epoch_{epoch+1}",
                 optimizer=qal_optimizer,
                 epoch=epoch + 1,
-                metrics={"val_loss": avg_val_loss},
+                metrics={"val_loss": val_loss},
                 version=timestamp
             )
             print(f"Saved models to {stnpp_path} and {qal_path}")
         
         # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             stnpp_path = save_model_with_version(
                 stnpp_model,
                 stnpp_output_dir,
                 "stnpp_best",
                 optimizer=stnpp_optimizer,
                 epoch=epoch + 1,
-                metrics={"val_loss": avg_val_loss},
+                metrics={"val_loss": val_loss},
                 version=timestamp
             )
             qal_path = save_model_with_version(
@@ -610,13 +578,131 @@ def train(args):
                 "qal_best",
                 optimizer=qal_optimizer,
                 epoch=epoch + 1,
-                metrics={"val_loss": avg_val_loss},
+                metrics={"val_loss": val_loss},
                 version=timestamp
             )
             print(f"Saved best models to {stnpp_path} and {qal_path}")
+        
+        # Clear GPU cache if needed
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     print("Training completed!")
     return stnpp_model, qal_model
+
+
+def evaluate(model, val_loader, criterion, device, args):
+    model.eval()
+    total_loss = 0
+    total_batches = 0
+    
+    # Initialize evaluation metrics
+    psnr_values = []
+    ssim_values = []
+    
+    with torch.no_grad():
+        for batch_idx, frames in enumerate(val_loader):
+            frames = frames.to(device)
+            
+            # Process in chunks if needed
+            if frames.shape[0] > args.batch_size:
+                reconstructed_chunks = []
+                for i in range(0, frames.shape[0], args.batch_size):
+                    chunk = frames[i:i+args.batch_size]
+                    chunk_output = model(chunk)
+                    reconstructed_chunks.append(chunk_output)
+                    del chunk, chunk_output
+                reconstructed_frames = torch.cat(reconstructed_chunks, dim=0)
+            else:
+                reconstructed_frames = model(frames)
+            
+            # Calculate metrics
+            loss = criterion(reconstructed_frames, frames)
+            total_loss += loss.item()
+            total_batches += 1
+            
+            # Calculate PSNR and SSIM
+            psnr = calculate_psnr(frames.cpu(), reconstructed_frames.cpu())
+            ssim = calculate_ssim(frames.cpu(), reconstructed_frames.cpu())
+            psnr_values.append(psnr)
+            ssim_values.append(ssim)
+            
+            # Free memory
+            del frames, reconstructed_frames
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            if batch_idx % args.log_interval == 0:
+                print(f"Validation Batch: {batch_idx}, Loss: {loss.item():.4f}, PSNR: {psnr:.2f}, SSIM: {ssim:.4f}")
+    
+    avg_loss = total_loss / total_batches
+    avg_psnr = sum(psnr_values) / len(psnr_values)
+    avg_ssim = sum(ssim_values) / len(ssim_values)
+    
+    print(f"\nValidation Summary:")
+    print(f"Average Loss: {avg_loss:.4f}")
+    print(f"Average PSNR: {avg_psnr:.2f}")
+    print(f"Average SSIM: {avg_ssim:.4f}")
+    
+    return avg_loss, avg_psnr, avg_ssim
+
+
+def calculate_psnr(original, reconstructed):
+    mse = torch.mean((original - reconstructed) ** 2)
+    return 20 * torch.log10(1.0 / torch.sqrt(mse))
+
+
+def calculate_ssim(original, reconstructed):
+    # Simple SSIM implementation
+    # You may want to use pytorch-msssim for more accurate results
+    c1 = (0.01 * 1.0) ** 2
+    c2 = (0.03 * 1.0) ** 2
+    
+    mu_x = torch.mean(original, dim=[2,3,4], keepdim=True)
+    mu_y = torch.mean(reconstructed, dim=[2,3,4], keepdim=True)
+    
+    sigma_x = torch.var(original, dim=[2,3,4], keepdim=True)
+    sigma_y = torch.var(reconstructed, dim=[2,3,4], keepdim=True)
+    sigma_xy = torch.mean((original - mu_x) * (reconstructed - mu_y), dim=[2,3,4], keepdim=True)
+    
+    ssim = ((2 * mu_x * mu_y + c1) * (2 * sigma_xy + c2)) / \
+           ((mu_x ** 2 + mu_y ** 2 + c1) * (sigma_x + sigma_y + c2))
+    
+    return torch.mean(ssim)
+
+
+class TemporalCNN3D(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(TemporalCNN3D, self).__init__()
+        
+        self.conv3d = nn.Sequential(
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Upsampling layer
+        self.upsample = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
+    
+    def forward(self, x):
+        # Input shape: [B, C, T, H, W]
+        print(f"TemporalCNN3D input shape: {x.shape}")
+        
+        # Apply 3D convolutions
+        x = self.conv3d(x)
+        print(f"After conv3d shape: {x.shape}")
+        
+        # Upsample spatial dimensions
+        x = self.upsample(x)
+        print(f"After upsample shape: {x.shape}")
+        
+        return x
 
 
 if __name__ == "__main__":
