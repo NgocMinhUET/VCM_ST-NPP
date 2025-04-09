@@ -411,7 +411,7 @@ def train(args):
         start_memory = torch.cuda.memory_allocated()
     
     # Set up gradient scaler for mixed precision training
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler()
     
     # Training loop
     print(f"Starting training for {args.epochs} epochs...")
@@ -437,7 +437,7 @@ def train(args):
             # Add debug logging before processing
             print(f"Input frames shape: {frames.shape}")
             
-            # Zero gradients
+            # Zero gradients for both optimizers
             stnpp_optimizer.zero_grad()
             qal_optimizer.zero_grad()
             
@@ -505,13 +505,16 @@ def train(args):
                 # Calculate loss
                 loss = criterion(frames, reconstructed_frames)
             
-            # Backward pass with gradient scaling
+            # Backward pass with gradient scaling for ST-NPP model only
             scaler.scale(loss).backward()
             
-            # Optimize with gradient scaling
+            # Optimize ST-NPP model with gradient scaling
             scaler.step(stnpp_optimizer)
-            scaler.step(qal_optimizer)
             scaler.update()
+            
+            # For QAL model, use regular optimization without scaling
+            # since it's not involved in the current forward pass
+            qal_optimizer.step()
             
             # Accumulate loss
             train_loss += loss.item() * frames.size(0)
