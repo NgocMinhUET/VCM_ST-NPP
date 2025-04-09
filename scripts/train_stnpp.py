@@ -61,22 +61,22 @@ class VideoDataset(Dataset):
             self.sequences = self._extract_image_sequences(image_files)
         else:
             # If no image files found, look for video files
-        video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
-        self.video_files = []
-        for ext in video_extensions:
-            self.video_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
-        
-        # Limit the number of videos if specified
-        if max_videos is not None:
-            self.video_files = self.video_files[:max_videos]
-        
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
+            self.video_files = []
+            for ext in video_extensions:
+                self.video_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
+            
+            # Limit the number of videos if specified
+            if max_videos is not None:
+                self.video_files = self.video_files[:max_videos]
+            
             # Check if any video files were found
             if len(self.video_files) == 0:
                 raise ValueError(f"No video files or image sequences found in {dataset_path}.")
             
-        # Extract frames from videos and create sequences
-        self.sequences = []
-        for video_file in tqdm(self.video_files, desc="Loading videos"):
+            # Extract frames from videos and create sequences
+            self.sequences = []
+            for video_file in tqdm(self.video_files, desc="Loading videos"):
                 self._extract_video_sequences(video_file)
         
         print(f"Created {len(self.sequences)} sequences")
@@ -296,13 +296,13 @@ def train(args):
     print("Initializing ST-NPP model...")
     try:
         stnpp_model = STNPP(
-            input_channels=3,
+        input_channels=3,
             output_channels=args.output_channels,
             spatial_backbone=args.stnpp_backbone,
-            temporal_model=args.temporal_model,
-            fusion_type=args.fusion_type,
-            pretrained=True
-        ).to(device)
+        temporal_model=args.temporal_model,
+        fusion_type=args.fusion_type,
+        pretrained=True
+    ).to(device)
     except Exception as e:
         print(f"Error initializing ST-NPP model: {e}")
         raise
