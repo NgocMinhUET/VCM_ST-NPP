@@ -490,7 +490,7 @@ def train(args):
             # Backward pass and optimization
             stnpp_optimizer.zero_grad()
             qal_optimizer.zero_grad()
-                loss.backward()
+            loss.backward()
             stnpp_optimizer.step()
             qal_optimizer.step()
             
