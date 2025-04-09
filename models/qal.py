@@ -41,22 +41,21 @@ class QAL(nn.Module):
             nn.Sigmoid()  # Scale factors between 0 and 1
         )
         
-    def forward(self, qp: Union[torch.Tensor, float, int], 
-                features: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, 
+                qp: Union[torch.Tensor, float, int]) -> torch.Tensor:
         """
-        Forward pass to generate scale factors based on QP.
+        Forward pass to apply scaling based on QP to the input features.
         
         Args:
+            features: Feature tensor to apply scaling (B, C, T, H, W)
             qp: Quantization Parameter (scalar or batch of scalars)
-            features: Optional feature tensor to apply scaling (B, C, T, H, W)
             
         Returns:
-            If features is None: Scale factors (B, feature_channels)
-            If features is provided: Scaled features (B, C, T, H, W)
+            Scaled features (B, C, T, H, W)
         """
         # Ensure QP is a tensor with the right shape
         if not isinstance(qp, torch.Tensor):
-            qp = torch.tensor([qp], dtype=torch.float32)
+            qp = torch.tensor([qp], dtype=torch.float32, device=features.device)
         
         if qp.dim() == 0:  # Handle scalar tensor
             qp = qp.unsqueeze(0)
@@ -67,26 +66,22 @@ class QAL(nn.Module):
         # Generate scale factors
         scale_factors = self.mlp(qp)  # Shape: (B, feature_channels)
         
-        # If features are provided, apply the scaling
-        if features is not None:
-            # Check batch size consistency
-            assert scale_factors.size(0) == features.size(0), \
-                f"Batch size mismatch: scale_factors ({scale_factors.size(0)}) " \
-                f"vs features ({features.size(0)})"
-            
-            # Reshape scale factors to match feature dimensions for broadcasting
-            B, C = scale_factors.shape
-            
-            if features.dim() == 5:  # (B, C, T, H, W)
-                scale_factors = scale_factors.view(B, C, 1, 1, 1)
-            else:  # (B, C, H, W)
-                scale_factors = scale_factors.view(B, C, 1, 1)
-            
-            # Apply scaling
-            scaled_features = features * scale_factors
-            return scaled_features
+        # Check batch size consistency
+        assert scale_factors.size(0) == features.size(0), \
+            f"Batch size mismatch: scale_factors ({scale_factors.size(0)}) " \
+            f"vs features ({features.size(0)})"
         
-        return scale_factors
+        # Reshape scale factors to match feature dimensions for broadcasting
+        B, C = scale_factors.shape
+        
+        if features.dim() == 5:  # (B, C, T, H, W)
+            scale_factors = scale_factors.view(B, C, 1, 1, 1)
+        else:  # (B, C, H, W)
+            scale_factors = scale_factors.view(B, C, 1, 1)
+        
+        # Apply scaling
+        scaled_features = features * scale_factors
+        return scaled_features
 
 
 class ConditionalQAL(nn.Module):
@@ -148,14 +143,14 @@ class ConditionalQAL(nn.Module):
             nn.Sigmoid()
         )
         
-    def forward(self, qp: Union[torch.Tensor, float, int], 
-                features: torch.Tensor) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, 
+                qp: Union[torch.Tensor, float, int]) -> torch.Tensor:
         """
         Forward pass to generate conditional scale factors and apply them.
         
         Args:
-            qp: Quantization Parameter (scalar or batch of scalars)
             features: Feature tensor to analyze and scale (B, C, T, H, W)
+            qp: Quantization Parameter (scalar or batch of scalars)
             
         Returns:
             Scaled features (B, C, T, H, W)
@@ -201,7 +196,7 @@ class PixelwiseQAL(nn.Module):
     """
     Pixelwise Quantization Adaptation Layer
     
-    This layer applies different scaling factors to different spatial
+    This version of QAL generates different scale factors for different
     positions in the feature map, allowing for more fine-grained adaptation.
     """
     
@@ -233,14 +228,14 @@ class PixelwiseQAL(nn.Module):
             nn.Sigmoid()
         )
     
-    def forward(self, qp: Union[torch.Tensor, float, int], 
-                features: torch.Tensor) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, 
+                qp: Union[torch.Tensor, float, int]) -> torch.Tensor:
         """
         Forward pass to generate pixelwise scale factors and apply them.
         
         Args:
-            qp: Quantization Parameter (scalar or batch of scalars)
             features: Feature tensor to analyze and scale (B, C, T, H, W)
+            qp: Quantization Parameter (scalar or batch of scalars)
             
         Returns:
             Scaled features (B, C, T, H, W)
@@ -290,25 +285,23 @@ def test_qal():
     # Test standard QAL
     print("Testing standard QAL...")
     qal = QAL(feature_channels=channels)
-    scale_factors = qal(qp)
-    scaled_features = qal(qp, features)
+    scaled_features = qal(features, qp)
     
     print(f"QP shape: {qp.shape}")
-    print(f"Scale factors shape: {scale_factors.shape}")
     print(f"Scaled features shape: {scaled_features.shape}")
-    print(f"Scale factor range: {scale_factors.min().item():.4f} - {scale_factors.max().item():.4f}")
+    print(f"Scale factor range: {scaled_features.min().item():.4f} - {scaled_features.max().item():.4f}")
     
     # Test conditional QAL
     print("\nTesting conditional QAL...")
     cqal = ConditionalQAL(feature_channels=channels)
-    cond_scaled_features = cqal(qp, features)
+    cond_scaled_features = cqal(features, qp)
     
     print(f"Conditionally scaled features shape: {cond_scaled_features.shape}")
     
     # Test pixelwise QAL
     print("\nTesting pixelwise QAL...")
     pqal = PixelwiseQAL(feature_channels=channels)
-    pw_scaled_features = pqal(qp, features)
+    pw_scaled_features = pqal(features, qp)
     
     print(f"Pixelwise scaled features shape: {pw_scaled_features.shape}")
     

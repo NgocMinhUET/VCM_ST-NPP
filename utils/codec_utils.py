@@ -204,10 +204,18 @@ def encode_with_hevc(input_path, output_path, qp=23, preset='medium', yuv_format
     """
     if resolution is None:
         raise ValueError("Resolution must be provided for raw YUV input")
+    
+    # Get the full path to the ffmpeg executable
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ffmpeg_path = os.path.join(project_root, 'ffmpeg', 'bin', 'ffmpeg.exe')
+    
+    # Verify that ffmpeg exists
+    if not os.path.exists(ffmpeg_path):
+        raise FileNotFoundError(f"FFmpeg executable not found at {ffmpeg_path}. Please run setup_ffmpeg.bat first.")
         
     # Construct ffmpeg command
     cmd = [
-        'ffmpeg',
+        ffmpeg_path,
         '-f', 'rawvideo',
         '-pixel_format', f"yuv{yuv_format}p",
         '-video_size', resolution,
@@ -224,7 +232,8 @@ def encode_with_hevc(input_path, output_path, qp=23, preset='medium', yuv_format
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         print(f"Error encoding video: {e}")
-        print(f"STDERR: {e.stderr.decode()}")
+        if hasattr(e, 'stderr'):
+            print(f"STDERR: {e.stderr.decode()}")
         raise
         
     return output_path
@@ -242,9 +251,17 @@ def decode_with_hevc(input_path, output_path, yuv_format='420', resolution=None)
     Returns:
         Path to the decoded YUV file
     """
+    # Get the full path to the ffmpeg executable
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ffmpeg_path = os.path.join(project_root, 'ffmpeg', 'bin', 'ffmpeg.exe')
+    
+    # Verify that ffmpeg exists
+    if not os.path.exists(ffmpeg_path):
+        raise FileNotFoundError(f"FFmpeg executable not found at {ffmpeg_path}. Please run setup_ffmpeg.bat first.")
+    
     # Construct ffmpeg command
     cmd = [
-        'ffmpeg',
+        ffmpeg_path,
         '-i', input_path,
         '-f', 'rawvideo',
         '-pixel_format', f"yuv{yuv_format}p"

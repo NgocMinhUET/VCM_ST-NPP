@@ -183,8 +183,8 @@ def parse_args():
                         help='Path to validation dataset (if None, uses a portion of training data)')
     
     # Model parameters
-    parser.add_argument('--stnpp_backbone', type=str, default='resnet18',
-                        help='Backbone CNN for spatial branch (resnet18, resnet34, resnet50)')
+    parser.add_argument('--stnpp_backbone', type=str, default='resnet50',
+                        help='Backbone CNN for spatial branch (resnet34, resnet50, efficientnet_b4)')
     parser.add_argument('--temporal_model', type=str, default='3dcnn',
                         help='Temporal model type (3dcnn, convlstm)')
     parser.add_argument('--qal_type', type=str, default='standard',
@@ -409,46 +409,21 @@ def train(args):
         train_start_time = time.time()
         
         for batch_idx, batch in enumerate(train_loader):
-            frames = batch['frames'].to(device)  # shape: [B, T, C, H, W]
+            frames = batch['frames'].to(device)
             
             # Choose a random QP for this batch
             qp = random.choice(qp_values)
             
-            # Convert QP to tensor with proper shape
-            # Create batch of QP values (one per batch item)
+            # Convert qp to a tensor with batch_size elements to match the batch size of frames
             qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
             
-            # Need to reshape frames for STNPP which expects [B, C, T, H, W]
-            frames_for_model = frames.permute(0, 2, 1, 3, 4)
+            # Forward pass through ST-NPP
+            preprocessed_frames = stnpp_model(frames)
             
-            # Forward pass through ST-NPP (takes [B, C, T, H, W], returns [B, C, T, H/4, W/4])
-            preprocessed_frames = stnpp_model(frames_for_model)
-            
-            # Forward pass through QAL with the current QP (returns [B, C, T, H/4, W/4])
+            # Forward pass through QAL with the chosen QP
             reconstructed_frames = qal_model(preprocessed_frames, qp_tensor)
             
-            # Now we need to make the reconstructed frames match the original frames format and size
-            # First get the original shape
-            B, T, C, H, W = frames.shape
-            
-            # 1. Permute reconstructed frames to match original frame dimensions order [B, T, C, H, W]
-            reconstructed_frames = reconstructed_frames.permute(0, 2, 1, 3, 4)
-            
-            # 2. Check if spatial dimensions need upsampling
-            if reconstructed_frames.shape[3:] != frames.shape[3:]:
-                # Reshape for F.interpolate: [B, T, C, H, W] -> [B*T, C, H, W]
-                reconstructed_frames = reconstructed_frames.reshape(-1, C, reconstructed_frames.shape[3], 
-                                                                  reconstructed_frames.shape[4])
-                
-                # Interpolate to match original size
-                reconstructed_frames = torch.nn.functional.interpolate(
-                    reconstructed_frames, size=(H, W), mode='bilinear', align_corners=False
-                )
-                
-                # Reshape back to [B, T, C, H, W]
-                reconstructed_frames = reconstructed_frames.reshape(B, T, C, H, W)
-            
-            # Now both frames and reconstructed_frames should have the same shape [B, T, C, H, W]
+            # Calculate loss
             loss = criterion(frames, reconstructed_frames)
             
             # Backward pass and optimization
@@ -473,23 +448,12 @@ def train(args):
                 
                 # Add sample images periodically
                 if batch_idx % 50 == 0:
-                    # Original frame - shapes are now [B, T, C, H, W]
-                    # Need to take the first frame of first batch [0, 0] and convert to [C, H, W]
-                    original_img = frames[0, 0].cpu()
-                    
-                    # Preprocessed frame - shape is [B, C, T, H, W]
-                    # Need to take the first frame of first batch and convert to [C, H, W]
-                    preprocessed_img = preprocessed_frames[0, :, 0].cpu()
-                    
-                    # Reconstructed frame - shape is now [B, T, C, H, W] 
-                    # Need to take the first frame of first batch [0, 0] and convert to [C, H, W]
-                    reconstructed_img = reconstructed_frames[0, 0].cpu()
-                    
-                    # Add images to TensorBoard
-                    writer.add_image('train/original', original_img, global_step)
-                    writer.add_image('train/preprocessed', preprocessed_img, global_step)
-                    writer.add_image('train/reconstructed', reconstructed_img, global_step)
-                    
+                    # Original frame
+                    writer.add_image('train/original', frames[0].cpu(), global_step)
+                    # Preprocessed frame
+                    writer.add_image('train/preprocessed', preprocessed_frames[0].cpu(), global_step)
+                    # Reconstructed frame
+                    writer.add_image('train/reconstructed', reconstructed_frames[0].cpu(), global_step)
                     # Add histograms for model parameters
                     for name, param in stnpp_model.named_parameters():
                         if param.requires_grad:
@@ -511,46 +475,21 @@ def train(args):
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(val_loader):
-                frames = batch['frames'].to(device)  # shape: [B, T, C, H, W]
+                frames = batch['frames'].to(device)
                 
                 # Evaluate on all QP values
                 batch_loss = 0
                 for qp in qp_values:
-                    # Convert QP to tensor with proper shape
-                    # Create batch of QP values (one per batch item)
+                    # Create QP tensor with batch_size elements
                     qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
                     
-                    # Need to reshape frames for STNPP which expects [B, C, T, H, W]
-                    frames_for_model = frames.permute(0, 2, 1, 3, 4)
+                    # Forward pass through ST-NPP
+                    preprocessed_frames = stnpp_model(frames)
                     
-                    # Forward pass through ST-NPP (takes [B, C, T, H, W], returns [B, C, T, H/4, W/4])
-                    preprocessed_frames = stnpp_model(frames_for_model)
-                    
-                    # Forward pass through QAL with the current QP (returns [B, C, T, H/4, W/4])
+                    # Forward pass through QAL with the current QP
                     reconstructed_frames = qal_model(preprocessed_frames, qp_tensor)
                     
-                    # Now we need to make the reconstructed frames match the original frames format and size
-                    # First get the original shape
-                    B, T, C, H, W = frames.shape
-                    
-                    # 1. Permute reconstructed frames to match original frame dimensions order [B, T, C, H, W]
-                    reconstructed_frames = reconstructed_frames.permute(0, 2, 1, 3, 4)
-                    
-                    # 2. Check if spatial dimensions need upsampling
-                    if reconstructed_frames.shape[3:] != frames.shape[3:]:
-                        # Reshape for F.interpolate: [B, T, C, H, W] -> [B*T, C, H, W]
-                        reconstructed_frames = reconstructed_frames.reshape(-1, C, reconstructed_frames.shape[3], 
-                                                                          reconstructed_frames.shape[4])
-                        
-                        # Interpolate to match original size
-                        reconstructed_frames = torch.nn.functional.interpolate(
-                            reconstructed_frames, size=(H, W), mode='bilinear', align_corners=False
-                        )
-                        
-                        # Reshape back to [B, T, C, H, W]
-                        reconstructed_frames = reconstructed_frames.reshape(B, T, C, H, W)
-                    
-                    # Now both frames and reconstructed_frames should have the same shape [B, T, C, H, W]
+                    # Calculate loss
                     loss = criterion(frames, reconstructed_frames)
                     batch_loss += loss.item()
                 

@@ -27,13 +27,16 @@ class SpatialBranch(nn.Module):
         
         # Load the backbone model
         if backbone_name == 'resnet50':
-            backbone = models.resnet50(pretrained=pretrained)
+            weights = 'IMAGENET1K_V1' if pretrained else None
+            backbone = models.resnet50(weights=weights)
             feature_channels = 2048
         elif backbone_name == 'resnet34':
-            backbone = models.resnet34(pretrained=pretrained)
+            weights = 'IMAGENET1K_V1' if pretrained else None
+            backbone = models.resnet34(weights=weights)
             feature_channels = 512
         elif backbone_name == 'efficientnet_b4':
-            backbone = models.efficientnet_b4(pretrained=pretrained)
+            weights = 'IMAGENET1K_V1' if pretrained else None
+            backbone = models.efficientnet_b4(weights=weights)
             feature_channels = 1792
         else:
             raise ValueError(f"Unsupported backbone: {backbone_name}")

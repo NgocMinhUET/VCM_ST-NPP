@@ -208,20 +208,45 @@ def download_davis_dataset(output_dir, force=False):
 
 def verify_ffmpeg():
     """Verify FFmpeg is installed."""
+    # First, check for the local FFmpeg in the project directory
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ffmpeg_path = os.path.join(project_root, 'ffmpeg', 'bin', 'ffmpeg.exe')
+    
+    if os.path.exists(ffmpeg_path):
+        try:
+            result = subprocess.run([ffmpeg_path, "-version"], 
+                                  stdout=subprocess.PIPE, 
+                                  stderr=subprocess.PIPE, 
+                                  text=True)
+            if result.returncode == 0:
+                print("Local FFmpeg is installed:")
+                print(result.stdout.splitlines()[0])
+                # Set FFmpeg path as a global variable for other functions to use
+                global FFMPEG_PATH
+                FFMPEG_PATH = ffmpeg_path
+                return True
+        except Exception as e:
+            print(f"Error running local FFmpeg: {e}")
+    
+    # Fallback to checking PATH
     try:
         result = subprocess.run(["ffmpeg", "-version"], 
                                stdout=subprocess.PIPE, 
                                stderr=subprocess.PIPE, 
                                text=True)
         if result.returncode == 0:
-            print("FFmpeg is installed:")
+            print("FFmpeg is installed (found in PATH):")
             print(result.stdout.splitlines()[0])
+            # Set FFmpeg path as the command name for other functions to use
+            global FFMPEG_PATH
+            FFMPEG_PATH = "ffmpeg"
             return True
         else:
             print("FFmpeg check failed.")
             return False
     except FileNotFoundError:
         print("FFmpeg is not installed or not in PATH.")
+        print(f"Local FFmpeg not found at {ffmpeg_path}")
         return False
 
 

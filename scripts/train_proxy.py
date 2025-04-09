@@ -179,14 +179,17 @@ def hevc_encode_decode(frames, qp, temp_dir=None):
     
     # Encode with HEVC
     height, width = frames_np.shape[1:3]
-    encoded_path = os.path.join(temp_dir, "encoded.hevc")
+    encoded_path = os.path.join(temp_dir, "encoded.265")
+    x265_exe = "/work/u9564043/Minh/Thesis/week_propose/p2/VCM_ST-NPP/x265_git/build/linux/x265"  # <-- thay bằng đường dẫn thực tế đến file `x265` sau khi build
     cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        "-s", f"{width}x{height}", "-i", str(yuv_path),
-        "-c:v", "libx265", "-preset", "medium",
-        "-x265-params", f"qp={qp}", str(encoded_path)
+        x265_exe,
+        "--input", str(yuv_path),
+        "--input-res", f"{width}x{height}",
+        "--fps", "30",
+        "--qp", str(qp),
+        "--output", str(encoded_path)
     ]
+  
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"FFmpeg encode error: {result.stderr.decode()}")
