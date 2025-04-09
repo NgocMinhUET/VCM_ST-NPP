@@ -462,27 +462,39 @@ def train(args):
             
             # Ensure reconstructed frames have same dimensions as input
             if reconstructed_frames.shape != frames.shape:
-                print("Resizing reconstructed frames to match input dimensions...")
-                B, T, C_out, H_out, W_out = reconstructed_frames.shape
+                print(f"Input shape: {frames.shape}")
+                print(f"Output shape before reshape: {reconstructed_frames.shape}")
                 
-                # First reshape to [B*T, C, H, W] for interpolation
-                reconstructed_frames = reconstructed_frames.reshape(B*T, C_out, H_out, W_out)
+                # First ensure we have the correct number of time steps
+                if len(reconstructed_frames.shape) == 5:  # [B, C, T, H, W] format
+                    reconstructed_frames = reconstructed_frames.permute(0, 2, 1, 3, 4)  # [B, T, C, H, W]
                 
-                # Interpolate to match spatial dimensions
-                reconstructed_frames = F.interpolate(reconstructed_frames, 
-                                                  size=(frames.shape[3], frames.shape[4]),
-                                                  mode='bilinear',
-                                                  align_corners=False)
+                B, T, C, H, W = frames.shape
+                _, T_out, C_out, H_out, W_out = reconstructed_frames.shape
                 
-                # Reshape back to [B, T, C, H, W]
-                reconstructed_frames = reconstructed_frames.reshape(B, T, C_out, frames.shape[3], frames.shape[4])
+                # Adjust time dimension if needed
+                if T_out != T:
+                    print(f"Adjusting time steps from {T_out} to {T}")
+                    reconstructed_frames = reconstructed_frames[:, :T, :, :, :]
                 
-                # Adjust number of channels if needed
-                if C_out != frames.shape[2]:
-                    print(f"Adjusting channels from {C_out} to {frames.shape[2]}")
-                    reconstructed_frames = reconstructed_frames[:, :, :frames.shape[2], :, :]
-            
-            print(f"Final reconstructed shape: {reconstructed_frames.shape}")
+                # Adjust channels if needed
+                if C_out != C:
+                    print(f"Adjusting channels from {C_out} to {C}")
+                    reconstructed_frames = reconstructed_frames[:, :, :C, :, :]
+                
+                # Adjust spatial dimensions if needed
+                if H_out != H or W_out != W:
+                    print(f"Adjusting spatial dimensions from {H_out}x{W_out} to {H}x{W}")
+                    reconstructed_frames = reconstructed_frames.reshape(B*T, C, H_out, W_out)
+                    reconstructed_frames = F.interpolate(
+                        reconstructed_frames, 
+                        size=(H, W),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                    reconstructed_frames = reconstructed_frames.reshape(B, T, C, H, W)
+                
+                print(f"Final output shape: {reconstructed_frames.shape}")
             
             # Calculate loss
             loss = criterion(frames, reconstructed_frames)
