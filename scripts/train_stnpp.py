@@ -510,7 +510,7 @@ def train(args):
             
             # Log progress
             if (batch_idx + 1) % 10 == 0:
-                print(f"Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.6f}")
+                #print(f"Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.6f}")
                 
                 # Log to TensorBoard
                 global_step = epoch * len(train_loader) + batch_idx
@@ -543,7 +543,7 @@ def train(args):
         # Calculate average training loss
         avg_train_loss = train_loss / len(train_dataset)
         train_time = time.time() - train_start_time
-        print(f"Training Loss: {avg_train_loss:.6f}, Time: {train_time:.2f}s")
+        #print(f"Training Loss: {avg_train_loss:.6f}, Time: {train_time:.2f}s")
         
         # Validation phase
         stnpp_model.eval()
@@ -682,9 +682,7 @@ def evaluate(model, val_loader, criterion, device, args):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            if batch_idx % 10 == 0:  # Changed from args.log_interval to fixed value
-                print(f"Validation Batch: {batch_idx}, Loss: {loss.item():.4f}, PSNR: {psnr:.2f}, SSIM: {ssim:.4f}")
-    
+            
     avg_loss = total_loss / total_batches
     avg_psnr = sum(psnr_values) / len(psnr_values)
     avg_ssim = sum(ssim_values) / len(ssim_values)
