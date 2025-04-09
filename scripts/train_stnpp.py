@@ -640,9 +640,6 @@ def evaluate(model, val_loader, criterion, device, args):
             
             # Ensure reconstructed frames have same dimensions as input
             if reconstructed_frames.shape != frames.shape:
-                print(f"Evaluation - Input shape: {frames.shape}")
-                print(f"Evaluation - Output shape before reshape: {reconstructed_frames.shape}")
-                
                 # First ensure we have the correct number of time steps
                 if len(reconstructed_frames.shape) == 5:  # [B, C, T, H, W] format
                     reconstructed_frames = reconstructed_frames.permute(0, 2, 1, 3, 4)  # [B, T, C, H, W]
@@ -652,17 +649,14 @@ def evaluate(model, val_loader, criterion, device, args):
                 
                 # Adjust time dimension if needed
                 if T_out != T:
-                    print(f"Evaluation - Adjusting time steps from {T_out} to {T}")
                     reconstructed_frames = reconstructed_frames[:, :T, :, :, :]
                 
                 # Adjust channels if needed
                 if C_out != C:
-                    print(f"Evaluation - Adjusting channels from {C_out} to {C}")
                     reconstructed_frames = reconstructed_frames[:, :, :C, :, :]
                 
                 # Adjust spatial dimensions if needed
                 if H_out != H or W_out != W:
-                    print(f"Evaluation - Adjusting spatial dimensions from {H_out}x{W_out} to {H}x{W}")
                     reconstructed_frames = reconstructed_frames.reshape(B*T, C, H_out, W_out)
                     reconstructed_frames = F.interpolate(
                         reconstructed_frames, 
@@ -671,8 +665,6 @@ def evaluate(model, val_loader, criterion, device, args):
                         align_corners=False
                     )
                     reconstructed_frames = reconstructed_frames.reshape(B, T, C, H, W)
-                
-                print(f"Evaluation - Final output shape: {reconstructed_frames.shape}")
             
             # Calculate metrics
             loss = criterion(frames, reconstructed_frames)
