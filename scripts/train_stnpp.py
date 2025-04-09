@@ -434,8 +434,7 @@ def train(args):
             # Convert QP to tensor with proper shape
             qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
             
-            # Add debug logging before processing
-            print(f"Input frames shape: {frames.shape}")
+            
             
             # Zero gradients for both optimizers
             stnpp_optimizer.zero_grad()
@@ -458,18 +457,12 @@ def train(args):
                 else:
                     reconstructed_frames = stnpp_model(frames)
                 
-                # Log memory usage
-                if torch.cuda.is_available():
-                    peak_memory = torch.cuda.max_memory_allocated()
-                    current_memory = torch.cuda.memory_allocated()
-                    print(f"Peak memory usage: {peak_memory/1e9:.2f} GB")
-                    print(f"Current memory usage: {current_memory/1e9:.2f} GB")
-                    print(f"Memory increase: {(current_memory - start_memory)/1e9:.2f} GB")
+           
+                   
                 
                 # Ensure reconstructed frames have same dimensions as input
                 if reconstructed_frames.shape != frames.shape:
-                    print(f"Input shape: {frames.shape}")
-                    print(f"Output shape before reshape: {reconstructed_frames.shape}")
+                   
                     
                     # First ensure we have the correct number of time steps
                     if len(reconstructed_frames.shape) == 5:  # [B, C, T, H, W] format
@@ -480,17 +473,14 @@ def train(args):
                     
                     # Adjust time dimension if needed
                     if T_out != T:
-                        print(f"Adjusting time steps from {T_out} to {T}")
                         reconstructed_frames = reconstructed_frames[:, :T, :, :, :]
                     
                     # Adjust channels if needed
                     if C_out != C:
-                        print(f"Adjusting channels from {C_out} to {C}")
                         reconstructed_frames = reconstructed_frames[:, :, :C, :, :]
                     
                     # Adjust spatial dimensions if needed
                     if H_out != H or W_out != W:
-                        print(f"Adjusting spatial dimensions from {H_out}x{W_out} to {H}x{W}")
                         reconstructed_frames = reconstructed_frames.reshape(B*T, C, H_out, W_out)
                         reconstructed_frames = F.interpolate(
                             reconstructed_frames, 
@@ -500,7 +490,6 @@ def train(args):
                         )
                         reconstructed_frames = reconstructed_frames.reshape(B, T, C, H, W)
                     
-                    print(f"Final output shape: {reconstructed_frames.shape}")
                 
                 # Calculate loss
                 loss = criterion(frames, reconstructed_frames)
