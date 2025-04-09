@@ -622,8 +622,9 @@ def evaluate(model, val_loader, criterion, device, args):
     ssim_values = []
     
     with torch.no_grad():
-        for batch_idx, frames in enumerate(val_loader):
-            frames = frames.to(device)
+        for batch_idx, batch in enumerate(val_loader):
+            # Handle dictionary output from dataset
+            frames = batch['frames'].to(device)
             
             # Process in chunks if needed
             if frames.shape[0] > args.batch_size:
@@ -638,7 +639,7 @@ def evaluate(model, val_loader, criterion, device, args):
                 reconstructed_frames = model(frames)
             
             # Calculate metrics
-            loss = criterion(reconstructed_frames, frames)
+            loss = criterion(frames, reconstructed_frames)
             total_loss += loss.item()
             total_batches += 1
             
@@ -653,7 +654,7 @@ def evaluate(model, val_loader, criterion, device, args):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            if batch_idx % args.log_interval == 0:
+            if batch_idx % 10 == 0:  # Changed from args.log_interval to fixed value
                 print(f"Validation Batch: {batch_idx}, Loss: {loss.item():.4f}, PSNR: {psnr:.2f}, SSIM: {ssim:.4f}")
     
     avg_loss = total_loss / total_batches
