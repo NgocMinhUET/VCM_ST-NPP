@@ -186,16 +186,22 @@ def train_joint(args):
     else:
         print(f"Loading Proxy Network model from {args.proxy_model}")
         try:
-            # Initialize with minimal params and let the model loading handle the rest
+            # Initialize with parameters that match the saved checkpoint
+            # Based on the ProxyNetwork class definition in models/proxy_network.py
             proxy_model = ProxyNetwork(
-                input_channels=3  # Only provide the required parameters
+                input_channels=128,  # From error: encoder.conv1.conv.weight: [64, 128, 3, 3, 3]
+                base_channels=64,    # Default value from the class
+                latent_channels=32   # Default value from the class
             )
+            
+            print(f"Initialized ProxyNetwork with input_channels=128, base_channels=64, latent_channels=32")
+            
             proxy_model, _ = load_model_with_version(proxy_model, args.proxy_model, device)
             proxy_model.eval()  # Set to evaluation mode since we don't train the proxy
             
-            # Check if proxy model has QP conditioning
-            has_qp_condition = hasattr(proxy_model, 'use_qp_condition') and proxy_model.use_qp_condition
-            print(f"Proxy Network QP conditioning: {'Enabled' if has_qp_condition else 'Disabled'}")
+            # Check if proxy model implements calculate_bitrate
+            has_calculate_bitrate = hasattr(proxy_model, 'calculate_bitrate')
+            print(f"Proxy Network calculate_bitrate method: {'Available' if has_calculate_bitrate else 'Not available'}")
             
         except Exception as e:
             print(f"Error loading Proxy Network model: {e}")
@@ -286,11 +292,14 @@ def train_joint(args):
                 raise NotImplementedError("Real codec training not implemented yet")
             else:
                 # Use proxy network for rate estimation
-                # Check if ProxyNetwork expects QP parameter
-                if hasattr(proxy_model, 'use_qp_condition') and proxy_model.use_qp_condition:
-                    estimated_rate = proxy_model(qal_output, qp_tensor)
-                else:
-                    estimated_rate = proxy_model(qal_output)
+                # ProxyNetwork returns (reconstructed, latent)
+                reconstructed_proxy, latent = proxy_model(qal_output)
+                
+                # Calculate the rate from the latent representation
+                estimated_rate = proxy_model.calculate_bitrate(latent)
+                
+                # Use the reconstructed output for perceptual evaluation if needed
+                # For now, we only use the bitrate estimate
             
             # Calculate loss
             loss, loss_components = criterion(frames, qal_output, estimated_rate)
@@ -351,11 +360,11 @@ def train_joint(args):
                     if args.use_real_codec:
                         raise NotImplementedError("Real codec validation not implemented yet")
                     else:
-                        # Check if ProxyNetwork expects QP parameter
-                        if hasattr(proxy_model, 'use_qp_condition') and proxy_model.use_qp_condition:
-                            estimated_rate = proxy_model(qal_output, qp_tensor)
-                        else:
-                            estimated_rate = proxy_model(qal_output)
+                        # ProxyNetwork returns (reconstructed, latent)
+                        reconstructed_proxy, latent = proxy_model(qal_output)
+                        
+                        # Calculate the rate from the latent representation
+                        estimated_rate = proxy_model.calculate_bitrate(latent)
                     
                     # Calculate loss
                     loss, _ = criterion(frames, qal_output, estimated_rate)
