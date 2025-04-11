@@ -119,7 +119,11 @@ class JointRDLoss(nn.Module):
         distortion_loss = self.mse_loss(original, preprocessed)
         
         # Rate loss (directly from rate estimator)
-        rate_loss = estimated_rate
+        # Handle both tensor and scalar rate values
+        if isinstance(estimated_rate, torch.Tensor):
+            rate_loss = estimated_rate.mean()
+        else:
+            rate_loss = estimated_rate
         
         # Total loss
         total_loss = (self.lambda_distortion * distortion_loss + 
@@ -131,7 +135,7 @@ class JointRDLoss(nn.Module):
             
         return total_loss, {
             'distortion_loss': distortion_loss.item(),
-            'rate_loss': rate_loss.item(),
+            'rate_loss': rate_loss.item() if isinstance(rate_loss, torch.Tensor) else rate_loss,
             'perceptual_loss': perceptual_loss.item() if perceptual_loss is not None else 0,
             'total_loss': total_loss.item()
         }
@@ -181,13 +185,21 @@ def train_joint(args):
         codec = HevcCodec()
     else:
         print(f"Loading Proxy Network model from {args.proxy_model}")
-        proxy_model = ProxyNetwork(
-            input_channels=3,  # Default value, will be overridden by loaded model
-            hidden_dim=64,  # Using hidden_dim instead of hidden_channels
-            use_qp_condition=True  # Default value, will be overridden by loaded model
-        )
-        proxy_model, _ = load_model_with_version(proxy_model, args.proxy_model, device)
-        proxy_model.eval()  # Set to evaluation mode since we don't train the proxy
+        try:
+            # Initialize with minimal params and let the model loading handle the rest
+            proxy_model = ProxyNetwork(
+                input_channels=3  # Only provide the required parameters
+            )
+            proxy_model, _ = load_model_with_version(proxy_model, args.proxy_model, device)
+            proxy_model.eval()  # Set to evaluation mode since we don't train the proxy
+            
+            # Check if proxy model has QP conditioning
+            has_qp_condition = hasattr(proxy_model, 'use_qp_condition') and proxy_model.use_qp_condition
+            print(f"Proxy Network QP conditioning: {'Enabled' if has_qp_condition else 'Disabled'}")
+            
+        except Exception as e:
+            print(f"Error loading Proxy Network model: {e}")
+            raise
     
     # Set up datasets and dataloaders
     train_dataset = VideoDataset(args.dataset)
@@ -275,7 +287,7 @@ def train_joint(args):
             else:
                 # Use proxy network for rate estimation
                 # Check if ProxyNetwork expects QP parameter
-                if 'use_qp_condition' in proxy_model.__dict__ and proxy_model.use_qp_condition:
+                if hasattr(proxy_model, 'use_qp_condition') and proxy_model.use_qp_condition:
                     estimated_rate = proxy_model(qal_output, qp_tensor)
                 else:
                     estimated_rate = proxy_model(qal_output)
@@ -340,7 +352,7 @@ def train_joint(args):
                         raise NotImplementedError("Real codec validation not implemented yet")
                     else:
                         # Check if ProxyNetwork expects QP parameter
-                        if 'use_qp_condition' in proxy_model.__dict__ and proxy_model.use_qp_condition:
+                        if hasattr(proxy_model, 'use_qp_condition') and proxy_model.use_qp_condition:
                             estimated_rate = proxy_model(qal_output, qp_tensor)
                         else:
                             estimated_rate = proxy_model(qal_output)
