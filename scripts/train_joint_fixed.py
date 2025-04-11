@@ -23,11 +23,13 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Import models
 from models.stnpp import STNPP
 from models.qal import QAL
 from models.proxy_network import ProxyNetwork
 from utils.model_utils import save_model_with_version, load_model_with_version
 from utils.codec_utils import HevcCodec
+# Import VideoDataset from train_stnpp since it's not in utils
 from scripts.train_stnpp import VideoDataset
 
 
@@ -56,7 +58,8 @@ def parse_args():
     # Training parameters
     parser.add_argument('--epochs', type=int, default=20,
                         help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    # Support both --lr and --learning_rate arguments
+    parser.add_argument('--lr', '--learning_rate', type=float, default=1e-5,
                         help='Learning rate')
     parser.add_argument('--qp_values', type=str, default='22,27,32,37',
                         help='Comma-separated list of QP values to train with')
@@ -119,7 +122,7 @@ class JointRDLoss(nn.Module):
         distortion_loss = self.mse_loss(original, preprocessed)
         
         # Rate loss (directly from rate estimator)
-        rate_loss = estimated_rate
+        rate_loss = estimated_rate.mean() if isinstance(estimated_rate, torch.Tensor) else estimated_rate
         
         # Total loss
         total_loss = (self.lambda_distortion * distortion_loss + 
@@ -131,7 +134,7 @@ class JointRDLoss(nn.Module):
             
         return total_loss, {
             'distortion_loss': distortion_loss.item(),
-            'rate_loss': rate_loss.item(),
+            'rate_loss': rate_loss.item() if isinstance(rate_loss, torch.Tensor) else rate_loss,
             'perceptual_loss': perceptual_loss.item() if perceptual_loss is not None else 0,
             'total_loss': total_loss.item()
         }
@@ -157,23 +160,31 @@ def train_joint(args):
     
     # Load ST-NPP model
     print(f"Loading ST-NPP model from {args.stnpp_model}")
-    stnpp_model = STNPP(
-        input_channels=3,
-        output_channels=128,  # Default value, will be overridden by loaded model
-        spatial_backbone='resnet50',  # Default value, will be overridden by loaded model
-        temporal_model='3dcnn',  # Default value, will be overridden by loaded model
-        fusion_type='concatenation',  # Default value, will be overridden by loaded model
-        pretrained=False  # We're loading weights, so no need for pretrained
-    )
-    stnpp_model, _ = load_model_with_version(stnpp_model, args.stnpp_model, device)
+    try:
+        stnpp_model = STNPP(
+            input_channels=3,
+            output_channels=128,  # Default value, will be overridden by loaded model
+            spatial_backbone='resnet50',  # Default value, will be overridden by loaded model
+            temporal_model='3dcnn',  # Default value, will be overridden by loaded model
+            fusion_type='concatenation',  # Default value, will be overridden by loaded model
+            pretrained=False  # We're loading weights, so no need for pretrained
+        )
+        stnpp_model, _ = load_model_with_version(stnpp_model, args.stnpp_model, device)
+    except Exception as e:
+        print(f"Error loading ST-NPP model: {e}")
+        raise
     
     # Load QAL model
     print(f"Loading QAL model from {args.qal_model}")
-    qal_model = QAL(
-        feature_channels=128,  # Default value, will be overridden by loaded model
-        hidden_dim=64  # Default value, will be overridden by loaded model
-    )
-    qal_model, _ = load_model_with_version(qal_model, args.qal_model, device)
+    try:
+        qal_model = QAL(
+            feature_channels=128,  # Default value, will be overridden by loaded model
+            hidden_dim=64  # Default value, will be overridden by loaded model
+        )
+        qal_model, _ = load_model_with_version(qal_model, args.qal_model, device)
+    except Exception as e:
+        print(f"Error loading QAL model: {e}")
+        raise
     
     # Load Proxy Network or initialize codec
     if args.use_real_codec:
@@ -181,33 +192,48 @@ def train_joint(args):
         codec = HevcCodec()
     else:
         print(f"Loading Proxy Network model from {args.proxy_model}")
-        proxy_model = ProxyNetwork(
-            input_channels=3,  # Default value, will be overridden by loaded model
-            hidden_channels=64,  # Default value, will be overridden by loaded model
-            use_qp_condition=True  # Default value, will be overridden by loaded model
-        )
-        proxy_model, _ = load_model_with_version(proxy_model, args.proxy_model, device)
-        proxy_model.eval()  # Set to evaluation mode since we don't train the proxy
+        try:
+            proxy_model = ProxyNetwork(
+                input_channels=3,  # Default value, will be overridden by loaded model
+                hidden_channels=64,  # Default value, will be overridden by loaded model
+                use_qp_condition=True  # Default value, will be overridden by loaded model
+            )
+            proxy_model, _ = load_model_with_version(proxy_model, args.proxy_model, device)
+            proxy_model.eval()  # Set to evaluation mode since we don't train the proxy
+        except Exception as e:
+            print(f"Error loading Proxy Network model: {e}")
+            raise
     
     # Set up datasets and dataloaders
-    train_dataset = VideoDataset(args.dataset)
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers
-    )
-    
-    if args.val_dataset:
-        val_dataset = VideoDataset(args.val_dataset)
-        val_loader = DataLoader(
-            val_dataset, 
+    print(f"Loading training dataset from: {args.dataset}")
+    try:
+        train_dataset = VideoDataset(args.dataset)
+        train_loader = DataLoader(
+            train_dataset, 
             batch_size=args.batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=args.num_workers
         )
+    except Exception as e:
+        print(f"Error loading training dataset: {e}")
+        raise
+    
+    if args.val_dataset:
+        print(f"Loading validation dataset from: {args.val_dataset}")
+        try:
+            val_dataset = VideoDataset(args.val_dataset)
+            val_loader = DataLoader(
+                val_dataset, 
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers
+            )
+        except Exception as e:
+            print(f"Error loading validation dataset: {e}")
+            raise
     else:
         # Use a portion of training data for validation
+        print("Using portion of training data for validation")
         train_size = int(0.8 * len(train_dataset))
         val_size = len(train_dataset) - train_size
         train_dataset, val_dataset = torch.utils.data.random_split(
@@ -222,6 +248,7 @@ def train_joint(args):
     
     # Parse QP values
     qp_values = [int(qp) for qp in args.qp_values.split(',')]
+    print(f"Using QP values: {qp_values}")
     
     # Set up optimizer
     # We're training both ST-NPP and QAL jointly
@@ -257,11 +284,14 @@ def train_joint(args):
             # Randomly select QP for this batch
             qp = random.choice(qp_values)
             
+            # Convert QP to tensor with proper shape for QAL model
+            qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
+            
             # Forward pass through ST-NPP
             preprocessed = stnpp_model(frames)
             
             # Forward pass through QAL
-            qal_output = qal_model(preprocessed, qp)
+            qal_output = qal_model(preprocessed, qp_tensor)
             
             # Estimate rate (using proxy network or real codec)
             if args.use_real_codec:
@@ -271,7 +301,7 @@ def train_joint(args):
                 raise NotImplementedError("Real codec training not implemented yet")
             else:
                 # Use proxy network for rate estimation
-                estimated_rate = proxy_model(qal_output)
+                estimated_rate = proxy_model(qal_output, qp_tensor)
             
             # Calculate loss
             loss, loss_components = criterion(frames, qal_output, estimated_rate)
@@ -319,17 +349,20 @@ def train_joint(args):
                 # We'll validate across all QP values
                 qp_results = []
                 for qp in qp_values:
+                    # Create QP tensor
+                    qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
+                    
                     # Forward pass through ST-NPP
                     preprocessed = stnpp_model(frames)
                     
                     # Forward pass through QAL
-                    qal_output = qal_model(preprocessed, qp)
+                    qal_output = qal_model(preprocessed, qp_tensor)
                     
                     # Estimate rate
                     if args.use_real_codec:
                         raise NotImplementedError("Real codec validation not implemented yet")
                     else:
-                        estimated_rate = proxy_model(qal_output)
+                        estimated_rate = proxy_model(qal_output, qp_tensor)
                     
                     # Calculate loss
                     loss, _ = criterion(frames, qal_output, estimated_rate)
@@ -337,6 +370,10 @@ def train_joint(args):
                 
                 # Average loss across QP values
                 val_losses.append(sum(qp_results) / len(qp_results))
+                
+                # Log progress
+                if (batch_idx + 1) % 10 == 0:
+                    print(f"Validation Batch {batch_idx+1}/{len(val_loader)}")
         
         avg_val_loss = sum(val_losses) / len(val_losses)
         print(f"Validation Loss: {avg_val_loss:.6f}")
@@ -353,87 +390,56 @@ def train_joint(args):
             stnpp_path = save_model_with_version(
                 stnpp_model,
                 args.output_dir,
-                "stnpp_joint",
-                optimizer=None,  # We don't save optimizer state for intermediate saves
+                f"stnpp_joint_epoch_{epoch+1}",
+                optimizer=optimizer,
                 epoch=epoch + 1,
                 metrics={"val_loss": avg_val_loss},
-                version=f"{timestamp}_e{epoch+1}"
+                version=timestamp
             )
             
             # Save QAL model
             qal_path = save_model_with_version(
                 qal_model,
                 args.output_dir,
-                "qal_joint",
-                optimizer=None,
+                f"qal_joint_epoch_{epoch+1}",
+                optimizer=optimizer,
                 epoch=epoch + 1,
                 metrics={"val_loss": avg_val_loss},
-                version=f"{timestamp}_e{epoch+1}"
+                version=timestamp
             )
             
             print(f"Saved models to {stnpp_path} and {qal_path}")
         
-        # Save best model
+        # Save best models
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             
-            # Save best ST-NPP model
-            best_stnpp_path = save_model_with_version(
+            # Save ST-NPP model
+            stnpp_path = save_model_with_version(
                 stnpp_model,
                 args.output_dir,
                 "stnpp_joint_best",
-                optimizer,
+                optimizer=optimizer,
                 epoch=epoch + 1,
-                metrics={"val_loss": best_val_loss},
+                metrics={"val_loss": avg_val_loss},
                 version=timestamp
             )
             
-            # Save best QAL model
-            best_qal_path = save_model_with_version(
+            # Save QAL model
+            qal_path = save_model_with_version(
                 qal_model,
                 args.output_dir,
                 "qal_joint_best",
-                optimizer,
+                optimizer=optimizer,
                 epoch=epoch + 1,
-                metrics={"val_loss": best_val_loss},
+                metrics={"val_loss": avg_val_loss},
                 version=timestamp
             )
             
-            print(f"New best model saved to {best_stnpp_path} and {best_qal_path}")
+            print(f"Saved best models to {stnpp_path} and {qal_path}")
     
-    # Final save at the end of training
-    final_stnpp_path = save_model_with_version(
-        stnpp_model,
-        args.output_dir,
-        "stnpp_joint_final",
-        optimizer,
-        epoch=args.epochs,
-        metrics={"val_loss": avg_val_loss},
-        version=timestamp
-    )
-    
-    final_qal_path = save_model_with_version(
-        qal_model,
-        args.output_dir,
-        "qal_joint_final",
-        optimizer,
-        epoch=args.epochs,
-        metrics={"val_loss": avg_val_loss},
-        version=timestamp
-    )
-    
-    print(f"Training completed. Final models saved to {final_stnpp_path} and {final_qal_path}")
-    writer.close()
-    
-    return {
-        "best_stnpp_model": best_stnpp_path if 'best_stnpp_path' in locals() else None,
-        "best_qal_model": best_qal_path if 'best_qal_path' in locals() else None,
-        "final_stnpp_model": final_stnpp_path,
-        "final_qal_model": final_qal_path,
-        "best_val_loss": best_val_loss,
-        "final_val_loss": avg_val_loss,
-        "log_dir": log_dir
-    }
+    print("Joint training completed!")
+    return stnpp_model, qal_model
 
 
 if __name__ == "__main__":
