@@ -56,7 +56,7 @@ def parse_args():
     # Training parameters
     parser.add_argument('--epochs', type=int, default=20,
                         help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', '--learning_rate', type=float, default=1e-4,
                         help='Learning rate')
     parser.add_argument('--qp_values', type=str, default='22,27,32,37',
                         help='Comma-separated list of QP values to train with')
