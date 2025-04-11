@@ -16,9 +16,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
+from pathlib import Path
+import cv2
+from tqdm import tqdm
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,7 +31,112 @@ from models.qal import QAL
 from models.proxy_network import ProxyNetwork
 from utils.model_utils import save_model_with_version, load_model_with_version
 from utils.codec_utils import HevcCodec
-from scripts.train_stnpp import VideoDataset
+
+# Import utils.video_utils for its other functions
+import utils.video_utils
+
+# Import our MOT dataset
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from mot_dataset import MOTImageSequenceDataset
+    HAS_MOT_DATASET = True
+except ImportError:
+    print("Warning: mot_dataset.py not found, MOT dataset functionality will not be available.")
+    print("If you need to use MOT dataset, make sure mot_dataset.py exists in the project root.")
+    HAS_MOT_DATASET = False
+
+    # Define a stub class to avoid errors
+    class MOTImageSequenceDataset:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("MOTImageSequenceDataset is not available. Please make sure mot_dataset.py exists.")
+
+
+class VideoDataset(Dataset):
+    """Dataset for loading video sequences."""
+    
+    def __init__(self, dataset_path, time_steps=16, transform=None, max_videos=None, frame_stride=4):
+        """
+        Initialize the VideoDataset.
+        
+        Args:
+            dataset_path: Path to the directory containing video files
+            time_steps: Number of frames in each sequence
+            transform: Optional transform to apply to the frames
+            max_videos: Maximum number of videos to load (for debugging)
+            frame_stride: Stride for frame sampling
+        """
+        self.dataset_path = Path(dataset_path)
+        self.time_steps = time_steps
+        self.transform = transform
+        self.frame_stride = frame_stride
+        
+        # Find all video files
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
+        self.video_files = []
+        for ext in video_extensions:
+            self.video_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
+        
+        # Check if any video files were found
+        if len(self.video_files) == 0:
+            raise ValueError(f"No video files found in {dataset_path}. Make sure the path exists and contains video files with extensions: {video_extensions}")
+        
+        # Limit the number of videos if specified
+        if max_videos is not None:
+            self.video_files = self.video_files[:max_videos]
+        
+        # Extract frames from videos and create sequences
+        self.sequences = []
+        for video_file in tqdm(self.video_files, desc="Loading videos"):
+            self._extract_sequences(video_file)
+        
+        # Check if any sequences were created
+        if len(self.sequences) == 0:
+            raise ValueError(f"No valid sequences could be created from the videos in {dataset_path}. Check that the videos have at least {time_steps} frames and are readable.")
+    
+    def _extract_sequences(self, video_file):
+        """Extract frame sequences from a video file."""
+        cap = cv2.VideoCapture(str(video_file))
+        
+        frames = []
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            # Convert BGR to RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Resize to a fixed size for consistency
+            frame = cv2.resize(frame, (224, 224))
+            
+            # Normalize to [0, 1]
+            frame = frame.astype(np.float32) / 255.0
+            
+            frames.append(frame)
+        
+        cap.release()
+        
+        # Create sequences with stride
+        if len(frames) >= self.time_steps:
+            for i in range(0, len(frames) - self.time_steps + 1, self.frame_stride):
+                sequence = frames[i:i + self.time_steps]
+                self.sequences.append(sequence)
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        sequence = self.sequences[idx]
+        
+        # Convert to tensor
+        sequence = np.array(sequence)
+        sequence = torch.from_numpy(sequence).permute(0, 3, 1, 2)  # (T, C, H, W)
+        
+        # Apply transform if specified
+        if self.transform:
+            sequence = self.transform(sequence)
+        
+        return {'frames': sequence}
 
 
 def parse_args():
@@ -45,13 +153,23 @@ def parse_args():
     
     # Dataset parameters
     parser.add_argument('--dataset', type=str, required=True,
-                        help='Path to video dataset')
+                        help='Path to video dataset or MOT16 dataset directory')
     parser.add_argument('--val_dataset', type=str, default=None,
                         help='Path to validation dataset (if None, uses a portion of training data)')
     parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size for training')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of worker threads for data loading')
+    parser.add_argument('--use_mot_dataset', action='store_true',
+                        help='Use MOT16 dataset format instead of video files')
+    parser.add_argument('--split', type=str, default='train',
+                        help='Dataset split to use when using MOT16 (train or test)')
+    parser.add_argument('--time_steps', type=int, default=16,
+                        help='Number of frames in each sequence')
+    parser.add_argument('--frame_stride', type=int, default=4,
+                        help='Stride for frame sampling')
+    parser.add_argument('--max_videos', type=int, default=None,
+                        help='Maximum number of videos to load (for debugging)')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=20,
@@ -186,44 +304,101 @@ def train_joint(args):
     else:
         print(f"Loading Proxy Network model from {args.proxy_model}")
         try:
-            # Initialize with parameters that match the saved checkpoint
-            # Based on the ProxyNetwork class definition in models/proxy_network.py
             proxy_model = ProxyNetwork(
-                input_channels=128,  # From error: encoder.conv1.conv.weight: [64, 128, 3, 3, 3]
-                base_channels=64,    # Default value from the class
-                latent_channels=32   # Default value from the class
+                input_channels=128,
+                base_channels=64,
+                latent_channels=32
             )
-            
-            print(f"Initialized ProxyNetwork with input_channels=128, base_channels=64, latent_channels=32")
-            
             proxy_model, _ = load_model_with_version(proxy_model, args.proxy_model, device)
-            proxy_model.eval()  # Set to evaluation mode since we don't train the proxy
-            
-            # Check if proxy model implements calculate_bitrate
-            has_calculate_bitrate = hasattr(proxy_model, 'calculate_bitrate')
-            print(f"Proxy Network calculate_bitrate method: {'Available' if has_calculate_bitrate else 'Not available'}")
-            
+            proxy_model.eval()
         except Exception as e:
             print(f"Error loading Proxy Network model: {e}")
             raise
     
-    # Set up datasets and dataloaders
-    train_dataset = VideoDataset(args.dataset)
+    # Load dataset
+    print("Loading dataset...")
+    try:
+        # Check if dataset path exists
+        if not os.path.exists(args.dataset):
+            print(f"ERROR: Dataset path does not exist: {args.dataset}")
+            print("Please provide a valid path to the dataset.")
+            if args.use_mot_dataset:
+                print("\nFor MOT16 dataset, the path should contain the following structure:")
+                print("  MOT16/")
+                print("  ├── train/")
+                print("  │   ├── MOT16-02/")
+                print("  │   ├── MOT16-04/")
+                print("  │   └── ...")
+                print("  └── test/")
+                print("      ├── MOT16-01/")
+                print("      ├── MOT16-03/")
+                print("      └── ...")
+            sys.exit(1)
+            
+        if args.use_mot_dataset:
+            # Use MOT16 dataset format
+            if not HAS_MOT_DATASET:
+                print("ERROR: MOT dataset functionality is not available.")
+                print("Please make sure mot_dataset.py exists in the project root.")
+                sys.exit(1)
+                
+            train_dataset = MOTImageSequenceDataset(
+                dataset_path=args.dataset,
+                time_steps=args.time_steps,
+                split=args.split,
+                frame_stride=args.frame_stride
+            )
+        else:
+            # Use video files
+            train_dataset = VideoDataset(
+                dataset_path=args.dataset,
+                time_steps=args.time_steps,
+                transform=None,
+                max_videos=args.max_videos,
+                frame_stride=args.frame_stride
+            )
+        
+        print(f"Dataset loaded with {len(train_dataset)} sequences")
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        raise
+    
+    # Create train dataloader
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        pin_memory=True
     )
     
+    # Handle validation dataset
     if args.val_dataset:
-        val_dataset = VideoDataset(args.val_dataset)
-        val_loader = DataLoader(
-            val_dataset, 
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers
-        )
+        try:
+            if args.use_mot_dataset:
+                val_dataset = MOTImageSequenceDataset(
+                    dataset_path=args.val_dataset,
+                    time_steps=args.time_steps,
+                    split='test',  # Use test split for validation
+                    frame_stride=args.frame_stride
+                )
+            else:
+                val_dataset = VideoDataset(
+                    dataset_path=args.val_dataset,
+                    time_steps=args.time_steps,
+                    transform=None,
+                    max_videos=args.max_videos,
+                    frame_stride=args.frame_stride
+                )
+        except Exception as e:
+            print(f"Error loading validation dataset: {e}")
+            print("Using a portion of training data for validation instead.")
+            # Split training dataset for validation
+            train_size = int(0.8 * len(train_dataset))
+            val_size = len(train_dataset) - train_size
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                train_dataset, [train_size, val_size]
+            )
     else:
         # Use a portion of training data for validation
         train_size = int(0.8 * len(train_dataset))
@@ -231,12 +406,14 @@ def train_joint(args):
         train_dataset, val_dataset = torch.utils.data.random_split(
             train_dataset, [train_size, val_size]
         )
-        val_loader = DataLoader(
-            val_dataset, 
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers
-        )
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
     
     # Parse QP values
     qp_values = [int(qp) for qp in args.qp_values.split(',')]

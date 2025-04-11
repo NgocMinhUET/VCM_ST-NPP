@@ -61,22 +61,22 @@ class VideoDataset(Dataset):
             self.sequences = self._extract_image_sequences(image_files)
         else:
             # If no image files found, look for video files
-            video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
-            self.video_files = []
-            for ext in video_extensions:
-                self.video_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
-            
-            # Limit the number of videos if specified
-            if max_videos is not None:
-                self.video_files = self.video_files[:max_videos]
-            
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
+        self.video_files = []
+        for ext in video_extensions:
+            self.video_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
+        
+        # Limit the number of videos if specified
+        if max_videos is not None:
+            self.video_files = self.video_files[:max_videos]
+        
             # Check if any video files were found
             if len(self.video_files) == 0:
                 raise ValueError(f"No video files or image sequences found in {dataset_path}.")
-            
-            # Extract frames from videos and create sequences
-            self.sequences = []
-            for video_file in tqdm(self.video_files, desc="Loading videos"):
+        
+        # Extract frames from videos and create sequences
+        self.sequences = []
+        for video_file in tqdm(self.video_files, desc="Loading videos"):
                 self._extract_video_sequences(video_file)
         
         print(f"Created {len(self.sequences)} sequences")
@@ -495,11 +495,11 @@ def train(args):
                 loss = criterion(frames, reconstructed_frames)
             
             # Backward pass with gradient scaling for ST-NPP model only
-            scaler.scale(loss).backward()
+                scaler.scale(loss).backward()
             
             # Optimize ST-NPP model with gradient scaling
             scaler.step(stnpp_optimizer)
-            scaler.update()
+                scaler.update()
             
             # For QAL model, use regular optimization without scaling
             # since it's not involved in the current forward pass
