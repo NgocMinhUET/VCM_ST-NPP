@@ -52,14 +52,14 @@ except ImportError:
 
 
 class VideoDataset(Dataset):
-    """Dataset for loading video sequences."""
+    """Dataset for loading video sequences or image sequences."""
     
     def __init__(self, dataset_path, time_steps=16, transform=None, max_videos=None, frame_stride=4):
         """
         Initialize the VideoDataset.
         
         Args:
-            dataset_path: Path to the directory containing video files
+            dataset_path: Path to the directory containing video files or image sequences
             time_steps: Number of frames in each sequence
             transform: Optional transform to apply to the frames
             max_videos: Maximum number of videos to load (for debugging)
@@ -70,30 +70,97 @@ class VideoDataset(Dataset):
         self.transform = transform
         self.frame_stride = frame_stride
         
-        # Find all video files
-        video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
-        self.video_files = []
-        for ext in video_extensions:
-            self.video_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
+        # Check if this is an image sequence dataset (like MOT16)
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
+        is_image_sequence = False
         
-        # Check if any video files were found
-        if len(self.video_files) == 0:
-            raise ValueError(f"No video files found in {dataset_path}. Make sure the path exists and contains video files with extensions: {video_extensions}")
+        # Check for image sequences first
+        image_files = []
+        for ext in image_extensions:
+            image_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
         
-        # Limit the number of videos if specified
-        if max_videos is not None:
-            self.video_files = self.video_files[:max_videos]
-        
-        # Extract frames from videos and create sequences
-        self.sequences = []
-        for video_file in tqdm(self.video_files, desc="Loading videos"):
-            self._extract_sequences(video_file)
+        if len(image_files) > 0:
+            print(f"Found {len(image_files)} image files, treating as image sequence dataset")
+            is_image_sequence = True
+            # Extract sequences from image directories
+            self.sequences = self._extract_image_sequences(image_files)
+        else:
+            # If no image files found, look for video files
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
+            self.video_files = []
+            for ext in video_extensions:
+                self.video_files.extend(list(self.dataset_path.glob(f'**/*{ext}')))
+            
+            # Limit the number of videos if specified
+            if max_videos is not None:
+                self.video_files = self.video_files[:max_videos]
+            
+            # Check if any video files were found
+            if len(self.video_files) == 0:
+                raise ValueError(f"No video files or image sequences found in {dataset_path}. "
+                                f"Make sure the path exists and contains video files with extensions: {video_extensions} "
+                                f"or image files with extensions: {image_extensions}")
+            
+            # Extract frames from videos and create sequences
+            self.sequences = []
+            for video_file in tqdm(self.video_files, desc="Loading videos"):
+                self._extract_video_sequences(video_file)
         
         # Check if any sequences were created
         if len(self.sequences) == 0:
-            raise ValueError(f"No valid sequences could be created from the videos in {dataset_path}. Check that the videos have at least {time_steps} frames and are readable.")
+            raise ValueError(f"No valid sequences could be created from the data in {dataset_path}. "
+                            f"Check that the videos/images have at least {time_steps} frames and are readable.")
+        
+        print(f"Created {len(self.sequences)} sequences")
     
-    def _extract_sequences(self, video_file):
+    def _extract_image_sequences(self, image_files):
+        """Extract frame sequences from image files."""
+        sequences = []
+        current_sequence = []
+        prev_dir = None
+        
+        # Sort image files to ensure proper sequence
+        image_files = sorted(image_files)
+        
+        for img_file in tqdm(image_files, desc="Processing image files"):
+            current_dir = img_file.parent
+            
+            # Start new sequence if directory changes
+            if prev_dir is not None and current_dir != prev_dir:
+                if len(current_sequence) >= self.time_steps:
+                    sequences.extend(self._create_subsequences(current_sequence))
+                current_sequence = []
+            
+            # Load and preprocess image
+            img = cv2.imread(str(img_file))
+            if img is not None:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                img = cv2.resize(img, (224, 224))
+                img = img.astype(np.float32) / 255.0
+                current_sequence.append(img)
+            
+            prev_dir = current_dir
+            
+            # Process sequence if it's long enough
+            if len(current_sequence) >= self.time_steps * 2:
+                sequences.extend(self._create_subsequences(current_sequence))
+                current_sequence = current_sequence[-self.time_steps:]  # Keep last sequence for overlap
+        
+        # Process remaining sequence
+        if len(current_sequence) >= self.time_steps:
+            sequences.extend(self._create_subsequences(current_sequence))
+        
+        return sequences
+    
+    def _create_subsequences(self, sequence):
+        """Create subsequences of length time_steps with stride."""
+        subsequences = []
+        for i in range(0, len(sequence) - self.time_steps + 1, self.frame_stride):
+            subsequence = sequence[i:i + self.time_steps]
+            subsequences.append(subsequence)
+        return subsequences
+    
+    def _extract_video_sequences(self, video_file):
         """Extract frame sequences from a video file."""
         cap = cv2.VideoCapture(str(video_file))
         
