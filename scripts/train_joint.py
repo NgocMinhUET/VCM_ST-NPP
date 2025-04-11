@@ -183,7 +183,7 @@ def train_joint(args):
         print(f"Loading Proxy Network model from {args.proxy_model}")
         proxy_model = ProxyNetwork(
             input_channels=3,  # Default value, will be overridden by loaded model
-            hidden_channels=64,  # Default value, will be overridden by loaded model
+            hidden_dim=64,  # Using hidden_dim instead of hidden_channels
             use_qp_condition=True  # Default value, will be overridden by loaded model
         )
         proxy_model, _ = load_model_with_version(proxy_model, args.proxy_model, device)
@@ -260,8 +260,11 @@ def train_joint(args):
             # Forward pass through ST-NPP
             preprocessed = stnpp_model(frames)
             
+            # Convert QP to tensor with proper shape for QAL model
+            qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
+            
             # Forward pass through QAL
-            qal_output = qal_model(preprocessed, qp)
+            qal_output = qal_model(preprocessed, qp_tensor)
             
             # Estimate rate (using proxy network or real codec)
             if args.use_real_codec:
@@ -271,7 +274,11 @@ def train_joint(args):
                 raise NotImplementedError("Real codec training not implemented yet")
             else:
                 # Use proxy network for rate estimation
-                estimated_rate = proxy_model(qal_output)
+                # Check if ProxyNetwork expects QP parameter
+                if 'use_qp_condition' in proxy_model.__dict__ and proxy_model.use_qp_condition:
+                    estimated_rate = proxy_model(qal_output, qp_tensor)
+                else:
+                    estimated_rate = proxy_model(qal_output)
             
             # Calculate loss
             loss, loss_components = criterion(frames, qal_output, estimated_rate)
@@ -322,14 +329,21 @@ def train_joint(args):
                     # Forward pass through ST-NPP
                     preprocessed = stnpp_model(frames)
                     
+                    # Convert QP to tensor with proper shape for QAL model
+                    qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
+                    
                     # Forward pass through QAL
-                    qal_output = qal_model(preprocessed, qp)
+                    qal_output = qal_model(preprocessed, qp_tensor)
                     
                     # Estimate rate
                     if args.use_real_codec:
                         raise NotImplementedError("Real codec validation not implemented yet")
                     else:
-                        estimated_rate = proxy_model(qal_output)
+                        # Check if ProxyNetwork expects QP parameter
+                        if 'use_qp_condition' in proxy_model.__dict__ and proxy_model.use_qp_condition:
+                            estimated_rate = proxy_model(qal_output, qp_tensor)
+                        else:
+                            estimated_rate = proxy_model(qal_output)
                     
                     # Calculate loss
                     loss, _ = criterion(frames, qal_output, estimated_rate)
