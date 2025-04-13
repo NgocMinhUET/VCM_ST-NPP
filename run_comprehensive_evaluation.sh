@@ -1,3 +1,4 @@
+
 # Find the latest model versions
 STNPP_MODEL=$(ls -t trained_models/joint/stnpp_joint_best_v*.pt | head -1)
 QAL_MODEL=$(ls -t trained_models/joint/qal_joint_best_v*.pt | head -1)
