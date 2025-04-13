@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 import cv2
 from tqdm import tqdm
+from torch.cuda.amp import GradScaler, autocast
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -54,7 +55,7 @@ except ImportError:
 class VideoDataset(Dataset):
     """Dataset for loading video sequences or image sequences."""
     
-    def __init__(self, dataset_path, time_steps=16, transform=None, max_videos=None, frame_stride=4):
+    def __init__(self, dataset_path, time_steps=16, transform=None, max_videos=None, frame_stride=4, resize=None):
         """
         Initialize the VideoDataset.
         
@@ -64,11 +65,13 @@ class VideoDataset(Dataset):
             transform: Optional transform to apply to the frames
             max_videos: Maximum number of videos to load (for debugging)
             frame_stride: Stride for frame sampling
+            resize: Optional target size to resize frames to (e.g., 112)
         """
         self.dataset_path = Path(dataset_path)
         self.time_steps = time_steps
         self.transform = transform
         self.frame_stride = frame_stride
+        self.resize = resize
         
         # Check if this is an image sequence dataset (like MOT16)
         image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
@@ -135,7 +138,13 @@ class VideoDataset(Dataset):
             img = cv2.imread(str(img_file))
             if img is not None:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                img = cv2.resize(img, (224, 224))
+                
+                # Use the resize parameter if specified
+                if self.resize is not None:
+                    img = cv2.resize(img, (self.resize, self.resize))
+                else:
+                    img = cv2.resize(img, (224, 224))
+                
                 img = img.astype(np.float32) / 255.0
                 current_sequence.append(img)
             
@@ -174,7 +183,10 @@ class VideoDataset(Dataset):
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
             # Resize to a fixed size for consistency
-            frame = cv2.resize(frame, (224, 224))
+            if self.resize is not None:
+                frame = cv2.resize(frame, (self.resize, self.resize))
+            else:
+                frame = cv2.resize(frame, (224, 224))
             
             # Normalize to [0, 1]
             frame = frame.astype(np.float32) / 255.0
@@ -268,6 +280,14 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help='Device to use for training (cuda/cpu)')
     
+    # Memory optimization parameters
+    parser.add_argument('--use_checkpointing', action='store_true',
+                        help='Use gradient checkpointing to save memory')
+    parser.add_argument('--use_amp', action='store_true',
+                        help='Use automatic mixed precision training')
+    parser.add_argument('--resize_frames', type=int, default=None,
+                        help='Resize input frames to this size to save memory (e.g., 112)')
+    
     return parser.parse_args()
 
 
@@ -281,6 +301,25 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+
+def enable_checkpointing(module):
+    """Enable gradient checkpointing for a module if applicable."""
+    if hasattr(module, 'gradient_checkpointing') and not isinstance(module, nn.Sequential):
+        module.gradient_checkpointing = True
+        print(f"Enabled checkpointing for {type(module).__name__}")
+    elif hasattr(module, 'backbone_features'):
+        # For our spatial branch
+        if hasattr(module.backbone_features, 'gradient_checkpointing'):
+            module.backbone_features.gradient_checkpointing = True
+            print(f"Enabled checkpointing for backbone features")
+    
+    # For ResNet models
+    if isinstance(module, (nn.modules.container.Sequential)):
+        for name, child in module.named_children():
+            if 'layer' in name and hasattr(child, 'gradient_checkpointing'):
+                child.gradient_checkpointing = True
+                print(f"Enabled checkpointing for {name}")
 
 
 class JointRDLoss(nn.Module):
@@ -395,6 +434,11 @@ def train_joint(args):
     )
     stnpp_model, _ = load_model_with_version(stnpp_model, args.stnpp_model, device)
     
+    # Enable gradient checkpointing if requested
+    if args.use_checkpointing:
+        print("Enabling gradient checkpointing to save memory")
+        stnpp_model.apply(enable_checkpointing)
+    
     # Load QAL model
     print(f"Loading QAL model from {args.qal_model}")
     qal_model = QAL(
@@ -461,7 +505,8 @@ def train_joint(args):
                 time_steps=args.time_steps,
                 transform=None,
                 max_videos=args.max_videos,
-                frame_stride=args.frame_stride
+                frame_stride=args.frame_stride,
+                resize=args.resize_frames
             )
         
         print(f"Dataset loaded with {len(train_dataset)} sequences")
@@ -494,7 +539,8 @@ def train_joint(args):
                     time_steps=args.time_steps,
                     transform=None,
                     max_videos=args.max_videos,
-                    frame_stride=args.frame_stride
+                    frame_stride=args.frame_stride,
+                    resize=args.resize_frames
                 )
         except Exception as e:
             print(f"Error loading validation dataset: {e}")
@@ -504,7 +550,7 @@ def train_joint(args):
             val_size = len(train_dataset) - train_size
             train_dataset, val_dataset = torch.utils.data.random_split(
                 train_dataset, [train_size, val_size]
-            )
+        )
     else:
         # Use a portion of training data for validation
         train_size = int(0.8 * len(train_dataset))
@@ -513,13 +559,13 @@ def train_joint(args):
             train_dataset, [train_size, val_size]
         )
     
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=args.batch_size,
-        shuffle=False,
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=args.batch_size,
+            shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True
-    )
+        )
     
     # Parse QP values
     qp_values = [int(qp) for qp in args.qp_values.split(',')]
@@ -538,6 +584,11 @@ def train_joint(args):
         lambda_rate=args.lambda_rate,
         lambda_perception=args.lambda_perception
     )
+    
+    # Initialize gradient scaler for mixed precision training
+    scaler = GradScaler() if args.use_amp else None
+    if args.use_amp:
+        print("Using Automatic Mixed Precision training")
     
     # Training loop
     best_val_loss = float('inf')
@@ -559,19 +610,23 @@ def train_joint(args):
             qp = random.choice(qp_values)
             
             # Forward pass through ST-NPP
-            preprocessed = stnpp_model(frames)
-            
             # Convert QP to tensor with proper shape for QAL model
             qp_tensor = torch.full((frames.size(0),), qp, dtype=torch.float32, device=device)
+            
+            # Free up some memory
+            torch.cuda.empty_cache()
+            
+            # Enable mixed precision if requested
+            if args.use_amp:
+                with autocast():
+                    # Forward pass through ST-NPP
+                    preprocessed = stnpp_model(frames)
             
             # Forward pass through QAL
             qal_output = qal_model(preprocessed, qp_tensor)
             
             # Estimate rate (using proxy network or real codec)
             if args.use_real_codec:
-                # This would be a placeholder for using a real codec
-                # In practice, you would need to implement a differentiable
-                # approximation or use straight-through estimator
                 raise NotImplementedError("Real codec training not implemented yet")
             else:
                 # Use proxy network for rate estimation
@@ -580,9 +635,35 @@ def train_joint(args):
                 
                 # Calculate the rate from the latent representation
                 estimated_rate = proxy_model.calculate_bitrate(latent)
+                
+                    # Calculate loss
+                    loss, loss_components = criterion(frames, qal_output, estimated_rate, reconstructed_proxy)
+                
+                # Backward pass and optimization with gradient scaling
+                optimizer.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Forward pass through ST-NPP
+                preprocessed = stnpp_model(frames)
+                
+                # Forward pass through QAL
+                qal_output = qal_model(preprocessed, qp_tensor)
+                
+                # Estimate rate (using proxy network or real codec)
+                if args.use_real_codec:
+                    raise NotImplementedError("Real codec training not implemented yet")
+                else:
+                    # Use proxy network for rate estimation
+                    # ProxyNetwork returns (reconstructed, latent)
+                    reconstructed_proxy, latent = proxy_model(qal_output)
+                    
+                    # Calculate the rate from the latent representation
+                    estimated_rate = proxy_model.calculate_bitrate(latent)
             
             # Calculate loss
-            loss, loss_components = criterion(frames, qal_output, estimated_rate, reconstructed_proxy)
+                loss, loss_components = criterion(frames, qal_output, estimated_rate, reconstructed_proxy)
             
             # Backward pass and optimization
             optimizer.zero_grad()
