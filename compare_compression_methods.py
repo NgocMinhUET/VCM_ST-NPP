@@ -700,7 +700,7 @@ def main():
         
         # Generate textual comparison table
         table_path = os.path.join(args.output_dir, "comparison_table.txt")
-        generate_summary_table(results, table_path)
+        generate_summary_table(results, None, args.output_dir)
         
         print(f"Sample data evaluation complete. Results saved to {args.output_dir}")
         return
@@ -827,7 +827,7 @@ def main():
     
     # Generate textual comparison table
     table_path = os.path.join(args.output_dir, "comparison_table.txt")
-    generate_summary_table(results, table_path)
+    generate_summary_table(results, None, args.output_dir)
     
     print(f"Evaluation complete. Results saved to {args.output_dir}")
 
