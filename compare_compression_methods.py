@@ -46,6 +46,10 @@ def parse_args():
                         help="CRF values for H.265 (comma-separated)")
     parser.add_argument("--vp9_crf", type=str, default="18,23,28,33",
                         help="CRF values for VP9 (comma-separated)")
+    parser.add_argument("--x265_preset", type=str, default="medium",
+                        choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 
+                                'medium', 'slow', 'slower', 'veryslow'],
+                        help="x265 encoding preset")
     
     # Testing parameters
     parser.add_argument("--use_sample_data", action="store_true",
@@ -211,7 +215,7 @@ def compress_with_our_method(frames, args, device, qp_level=None):
     
     return compressed_frames, total_compressed_size, compression_time
 
-def compress_with_ffmpeg(frames, codec, crf, output_dir, temp_name="temp"):
+def compress_with_ffmpeg(frames, codec, crf, output_dir, temp_name="temp", x265_preset="medium"):
     """Compress frames using FFmpeg with the specified codec and CRF."""
     print(f"Compressing with {codec} at CRF {crf}...")
     temp_input_dir = os.path.join(output_dir, "temp_input")
@@ -225,7 +229,7 @@ def compress_with_ffmpeg(frames, codec, crf, output_dir, temp_name="temp"):
     if codec == "h264":
         codec_params = ["-c:v", "libx264", "-crf", str(crf), "-preset", "medium"]
     elif codec == "h265":
-        codec_params = ["-c:v", "libx265", "-crf", str(crf), "-preset", "medium"]
+        codec_params = ["-c:v", "libx265", "-crf", str(crf), "-preset", x265_preset]
     elif codec == "vp9":
         codec_params = ["-c:v", "libvpx-vp9", "-crf", str(crf), "-b:v", "0"]
     else:
@@ -660,128 +664,39 @@ def generate_sample_data():
 def main():
     args = parse_args()
     
-    # Check if FFmpeg is available for codec comparisons
+    # Check FFmpeg installation and codec support
     ffmpeg_available, has_h264, has_h265, has_vp9 = check_ffmpeg()
     
-    # Determine which codecs to compare based on availability
-    codecs_to_compare = []
-    if args.use_sample_data:
-        # When using sample data, include all codecs
-        codecs_to_compare = ["h264", "h265", "vp9"]
-    else:
-        # Only include codecs that are available
-        if ffmpeg_available:
-            if has_h264:
-                codecs_to_compare.append("h264")
-            if has_h265:
-                codecs_to_compare.append("h265")
-            if has_vp9:
-                codecs_to_compare.append("vp9")
-            
-            if not codecs_to_compare:
-                print("Warning: FFmpeg is available but no supported codecs found.")
-                print("Will only evaluate our method without comparing to other codecs.")
-        else:
-            print("Warning: FFmpeg not available. Cannot compare with standard codecs.")
-            print("Will only evaluate our method without comparing to other codecs.")
-    
-    # Use sample data if requested
-    if args.use_sample_data:
-        print("Using sample data instead of running actual compression.")
-        results = generate_sample_data()
-        
-        # Save the results
-        os.makedirs(args.output_dir, exist_ok=True)
-        with open(os.path.join(args.output_dir, "compression_results.json"), 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        # Create comparison plots
-        create_comparison_plots(results, args.output_dir)
-        
-        # Generate textual comparison table
-        table_path = os.path.join(args.output_dir, "comparison_table.txt")
-        generate_summary_table(results, None, args.output_dir)
-        
-        print(f"Sample data evaluation complete. Results saved to {args.output_dir}")
+    if not ffmpeg_available:
+        print("FFmpeg not found. Please install FFmpeg first.")
         return
     
-    # Check if CUDA is available
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Determine which codecs to compare
+    codecs_to_compare = []
+    if has_h264:
+        codecs_to_compare.append("h264")
+    if has_h265:
+        codecs_to_compare.append("h265")
+    if has_vp9:
+        codecs_to_compare.append("vp9")
+    
+    if not codecs_to_compare:
+        print("No supported codecs found.")
+        return
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Get sequence path
-    sequence_path = Path(args.sequence_path)
-    if not sequence_path.exists():
-        print(f"Error: Sequence path does not exist: {sequence_path}")
-        return
-    
-    # Extract frames
-    print("Extracting frames...")
-    img_dir = sequence_path / "img1"
-    if not img_dir.exists():
-        print(f"Error: Image directory not found: {img_dir}")
-        return
-    
-    # Read frames
-    frame_files = sorted(list(img_dir.glob("*.jpg")))[:args.max_frames]
-    if not frame_files:
-        print("No frame files found.")
-        return
-    
-    frames = []
-    for file in tqdm(frame_files):
-        frame = cv2.imread(str(file))
-        if frame is None:
-            continue
-        frames.append(frame)
-    
-    print(f"Loaded {len(frames)} frames.")
+    # Load frames from sequence
+    frames = load_frames(args.sequence_path, args.max_frames)
     if not frames:
         print("No frames loaded.")
         return
     
-    # Calculate original size
-    original_size = sum(frame.nbytes for frame in frames)
-    print(f"Original total size: {original_size / (1024 * 1024):.2f} MB")
-    
-    # Evaluate our method
     results = {}
-    results["our_method"] = []
     
-    # Define QP levels for our method (if needed)
-    qp_levels = [1, 2, 3]  # Different compression levels
-    
-    for qp_level in qp_levels:
-        our_compressed_frames, our_compressed_size, our_compression_time = compress_with_our_method(
-            frames, args, device, qp_level)
-        
-        if our_compressed_frames:
-            our_results = evaluate_compression(frames, our_compressed_frames, our_compressed_size)
-            compression_ratio = original_size / our_compressed_size
-            
-            # Calculate bits per pixel
-            total_pixels = sum(frame.shape[0] * frame.shape[1] for frame in frames)
-            bpp = (our_compressed_size * 8) / total_pixels
-            
-            results["our_method"].append({
-                "quality_param": qp_level,
-                "original_size": original_size,
-                "compressed_size": our_compressed_size,
-                "compression_ratio": compression_ratio,
-                "bpp": bpp,
-                "psnr": our_results["psnr"],
-                "ms_ssim": our_results["ms_ssim"],
-                "compression_time": our_compression_time
-            })
-    
-    # Evaluate standard codecs
+    # Test different compression methods
     for codec in codecs_to_compare:
-        results[codec] = []
-        
-        # Get CRF values for this codec
         if codec == "h264":
             crf_values = [int(x) for x in args.h264_crf.split(",")]
         elif codec == "h265":
@@ -790,30 +705,30 @@ def main():
             crf_values = [int(x) for x in args.vp9_crf.split(",")]
         
         for crf in crf_values:
+            method_name = f"{codec}_crf{crf}"
+            print(f"\nTesting {method_name}...")
+            
+            if args.use_sample_data:
+                # Use sample data for testing
+                results[method_name] = get_sample_results(method_name)
+                continue
+            
+            # Compress frames
             start_time = time.time()
-            
-            codec_frames, codec_size = compress_with_ffmpeg(frames, codec, crf, args.output_dir)
-            
+            compressed_frames, compressed_size = compress_with_ffmpeg(
+                frames, codec, crf, args.output_dir,
+                x265_preset=args.x265_preset if codec == "h265" else "medium"
+            )
             compression_time = time.time() - start_time
             
-            if codec_frames:
-                codec_results = evaluate_compression(frames, codec_frames, codec_size)
-                compression_ratio = original_size / codec_size
-                
-                # Calculate bits per pixel
-                total_pixels = sum(frame.shape[0] * frame.shape[1] for frame in frames)
-                bpp = (codec_size * 8) / total_pixels
-                
-                results[codec].append({
-                    "quality_param": crf,
-                    "original_size": original_size,
-                    "compressed_size": codec_size,
-                    "compression_ratio": compression_ratio,
-                    "bpp": bpp,
-                    "psnr": codec_results["psnr"],
-                    "ms_ssim": codec_results["ms_ssim"],
-                    "compression_time": compression_time
-                })
+            if compressed_frames is None:
+                print(f"Compression failed for {method_name}")
+                continue
+            
+            # Evaluate compression
+            eval_results = evaluate_compression(frames, compressed_frames, compressed_size)
+            eval_results["compression_time"] = compression_time
+            results[method_name] = eval_results
     
     # Save the results
     with open(os.path.join(args.output_dir, "compression_results.json"), 'w') as f:
