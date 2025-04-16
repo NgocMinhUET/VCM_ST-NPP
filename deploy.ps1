@@ -15,7 +15,7 @@ Write-Host "Running: $scpCommand"
 cmd /c $scpCommand
 
 Write-Host "Making script executable and running installation..."
-$sshCommand = "ssh -p $SERVER_PORT $SERVER_USER@$SERVER_IP 'cd ~ && chmod +x install_x265_remote.sh && bash install_x265_remote.sh'"
+$sshCommand = "ssh -tt -p $SERVER_PORT $SERVER_USER@$SERVER_IP `"cd ~ && chmod +x install_x265_remote.sh && bash install_x265_remote.sh`""
 Write-Host "Running: $sshCommand"
 cmd /c $sshCommand
 
