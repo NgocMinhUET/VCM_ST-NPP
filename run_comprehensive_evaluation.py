@@ -30,6 +30,10 @@ def parse_args():
                         help="CRF values for H.265 (comma-separated)")
     parser.add_argument("--vp9_crf", type=str, default="18,23,28,33",
                         help="CRF values for VP9 (comma-separated)")
+    parser.add_argument("--x265_preset", type=str, default="medium",
+                        choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 
+                                'medium', 'slow', 'slower', 'veryslow'],
+                        help="x265 encoding preset")
     
     # Output parameters
     parser.add_argument("--output_dir", type=str, 
@@ -65,6 +69,10 @@ def run_evaluation(args):
         "--sequence_path", args.sequence_path,
         "--max_frames", str(args.max_frames),
         "--output_dir", compression_output_dir,
+        "--h264_crf", args.h264_crf,
+        "--h265_crf", args.h265_crf,
+        "--vp9_crf", args.vp9_crf,
+        "--x265_preset", args.x265_preset,
         "--use_sample_data"  # Use sample data mode to avoid encoding issues
     ]
     
@@ -129,6 +137,10 @@ def main():
         "--sequence_path", args.sequence_path,
         "--max_frames", str(args.max_frames),
         "--output_dir", compression_dir,
+        "--h264_crf", args.h264_crf,
+        "--h265_crf", args.h265_crf,
+        "--vp9_crf", args.vp9_crf,
+        "--x265_preset", args.x265_preset,
         "--use_sample_data"
     ]
     
