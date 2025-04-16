@@ -63,40 +63,42 @@ def parse_args():
     return parser.parse_args()
 
 def check_ffmpeg():
-    """Check if FFmpeg is installed and in PATH."""
+    """Check if ffmpeg is installed and has required codecs."""
+    # Check for local x265 installation
+    home_dir = os.path.expanduser("~")
+    local_x265_path = os.path.join(home_dir, "local", "bin", "x265")
+    
+    if os.path.exists(local_x265_path):
+        # Add local bin and lib to PATH and LD_LIBRARY_PATH
+        local_bin = os.path.join(home_dir, "local", "bin")
+        local_lib = os.path.join(home_dir, "local", "lib")
+        
+        os.environ["PATH"] = f"{local_bin}:{os.environ.get('PATH', '')}"
+        os.environ["LD_LIBRARY_PATH"] = f"{local_lib}:{os.environ.get('LD_LIBRARY_PATH', '')}"
+        print(f"Found local x265 installation at {local_x265_path}")
+
     try:
-        result = subprocess.run(["ffmpeg", "-version"], 
-                               stdout=subprocess.PIPE, 
-                               stderr=subprocess.PIPE, 
-                               text=True)
-        if result.returncode == 0:
-            version_line = result.stdout.splitlines()[0]
+        # Check if ffmpeg is installed
+        subprocess.run(["ffmpeg", "-version"], check=True, capture_output=True)
+        
+        # Check for required codecs
+        ffmpeg_output = subprocess.run(["ffmpeg", "-codecs"], check=True, capture_output=True, text=True).stdout
+        
+        # Check for H.264 support
+        if "libx264" not in ffmpeg_output:
+            raise RuntimeError("FFmpeg is missing H.264 support (libx264)")
+        
+        # Check for H.265 support (either through system ffmpeg or local installation)
+        if "libx265" not in ffmpeg_output and not os.path.exists(local_x265_path):
+            raise RuntimeError("FFmpeg is missing H.265 support (libx265) and no local x265 installation found")
             
-            # Check for H.264, H.265, and VP9 support
-            encoders_result = subprocess.run(["ffmpeg", "-encoders"],
-                                           stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE,
-                                           text=True)
-            
-            has_h264 = "libx264" in encoders_result.stdout
-            has_h265 = "libx265" in encoders_result.stdout or "hevc" in encoders_result.stdout.lower()
-            has_vp9 = "libvpx-vp9" in encoders_result.stdout
-            
-            print(f"FFmpeg found: {version_line}")
-            print(f"Codec support: H.264 ({'✓' if has_h264 else '✗'}), "
-                  f"H.265 ({'✓' if has_h265 else '✗'}), "
-                  f"VP9 ({'✓' if has_vp9 else '✗'})")
-            
-            return True, has_h264, has_h265, has_vp9
-        else:
-            print("Error checking FFmpeg version.")
-            return False, False, False, False
-    except FileNotFoundError:
-        print("FFmpeg not found in PATH.")
-        print("Please install FFmpeg or run setup scripts:")
-        print("  - Windows: scripts/setup_ffmpeg.bat")
-        print("  - Linux/macOS: scripts/setup_ffmpeg.sh")
-        return False, False, False, False
+    except subprocess.CalledProcessError:
+        raise RuntimeError(
+            "FFmpeg is not installed. Please install FFmpeg with H.264 and H.265 support.\n"
+            "For H.265 support without root access, you can build x265 locally using:\n"
+            "  ./build_x265.ps1\n"
+            "This will install x265 in your home directory."
+        )
 
 def calculate_psnr(original, compressed):
     """Calculate PSNR between original and compressed frames."""
@@ -661,6 +663,35 @@ def generate_sample_data():
     
     return sample_results
 
+def check_encoder_packages():
+    """Check if required encoder packages are installed."""
+    try:
+        # Check for x264
+        x264_result = subprocess.run(["pkg-config", "--exists", "x264"],
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        has_x264_dev = x264_result.returncode == 0
+
+        # Check for x265
+        x265_result = subprocess.run(["pkg-config", "--exists", "x265"],
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        has_x265_dev = x265_result.returncode == 0
+
+        if not (has_x264_dev and has_x265_dev):
+            print("\nMissing encoder development packages:")
+            if not has_x264_dev:
+                print("- x264 development package not found")
+            if not has_x265_dev:
+                print("- x265 development package not found")
+            print("\nPlease install the required packages:")
+            print("  Ubuntu/Debian: sudo apt-get install libx264-dev libx265-dev")
+            print("  CentOS/RHEL: sudo yum install x264-devel x265-devel")
+            print("  macOS: brew install x264 x265")
+    except FileNotFoundError:
+        # pkg-config not found, skip this check
+        pass
+
 def main():
     args = parse_args()
     
@@ -669,6 +700,11 @@ def main():
     
     if not ffmpeg_available:
         print("FFmpeg not found. Please install FFmpeg first.")
+        return
+    
+    # Check encoder packages if codecs are not detected
+    if not (has_h264 or has_h265 or has_vp9):
+        check_encoder_packages()
         return
     
     # Determine which codecs to compare
