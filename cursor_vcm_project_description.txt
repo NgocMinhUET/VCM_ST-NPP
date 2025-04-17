@@ -1,0 +1,96 @@
+# Project Specification for Cursor AI: Task-Aware End-to-End Video Preprocessing for Machine Vision
+
+## 🎯 Objective
+To build a deep-learning-based video preprocessing module that improves machine vision performance (object detection, segmentation, tracking) under standard video compression (e.g., HEVC/VVC), without modifying the codec itself.
+
+---
+
+## 🧩 System Architecture Overview
+
+### 1. Spatio-Temporal Neural Preprocessing (ST-NPP)
+- **Spatial Branch**: 2D CNN (e.g., ResNet-50, EfficientNet-B4)
+- **Temporal Branch**: 3D CNN or ConvLSTM
+- **Fusion**: Combined via attention or concatenation → 1x1 Conv → 128D feature map
+
+### 2. Quantization Adaptation Layer (QAL)
+- 3-layer MLP: takes QP (Quantization Parameter) as input
+- Outputs a 128D scale vector → channel-wise modulates ST-NPP output
+
+### 3. Proxy Network
+- A 3D convolutional autoencoder that mimics HEVC/VVC codec behavior
+- Used during training to allow backpropagation
+
+---
+
+## 🔁 Task-Aware End-to-End Training Strategy
+
+Instead of treating codec approximation and preprocessing optimization as separate stages, the system is trained end-to-end with task-specific supervision.
+
+### 1. Proxy Network Training
+- Trained first with:
+  - MSE / SSIM loss between proxy output and HEVC output
+- Allows backpropagation in training pipeline
+
+### 2. End-to-End Task Training
+- Pipeline: Input video → ST-NPP + QAL → Proxy Codec → Task Network
+- Optimized using:
+
+\[
+\mathcal{L}_{total} = \mathcal{L}_{task} + \lambda_1 \cdot \mathcal{L}_{distortion} + \lambda_2 \cdot \mathcal{L}_{rate}
+\]
+
+- `L_task`: based on downstream task (e.g., detection loss, segmentation IoU)
+- `L_distortion`: SSIM or MSE
+- `L_rate`: bitrate estimation (optional)
+
+### 3. Final Inference with Codec
+- During inference, replace proxy with actual codec (via ffmpeg)
+- Run downstream task (e.g., detection) on decoded output
+
+---
+
+## 🎥 Codec Integration
+- Use ffmpeg with libx264 / libx265 (e.g., CRF or QP: 22, 27, 32, 37)
+- Use actual encoding/decoding during evaluation
+- Maintain compatibility with existing video pipelines
+
+---
+
+## 📊 Evaluation
+- Tasks:
+  - Detection → mAP (COCO Video)
+  - Segmentation → mIoU (KITTI)
+  - Tracking → MOTA / IDF1 (MOTChallenge)
+- Metrics:
+  - BD-Rate (rate-distortion efficiency)
+  - Task accuracy across QPs
+- Output: CSV / JSON log, compressed videos, annotated figures
+
+---
+
+## 📁 Project Requirements for Cursor
+- Provide the following modules:
+  - `models/` — ST-NPP, QAL, Proxy Network
+  - `scripts/` — train.py, evaluate.py, encode_decode.py
+  - `data/` — organized input data pipeline
+- Include `run_comprehensive_evaluation.sh`
+- Include `README.md` with:
+  - Setup instructions (conda + ffmpeg)
+  - Dataset download guide
+  - Training & evaluation commands
+
+---
+
+## 🧠 Notes for Cursor
+- Prioritize task performance, not just distortion/bitrate
+- Avoid training modules in isolation — optimize with task loss
+- Ensure proxy is not used during final inference
+- Ensure all outputs are saved and reproducible
+
+---
+
+## ✅ Deliverables Expected
+- Complete codebase with modular design
+- Fully working training and evaluation pipeline
+- End-to-end results on at least one task (e.g., detection)
+- Visual and numerical comparison with baselines (e.g., x264-only, x265-only)

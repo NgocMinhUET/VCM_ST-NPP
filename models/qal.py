@@ -1,312 +1,405 @@
 """
-Quantization Adaptation Layer (QAL) Model
+Quantization Adaptation Layer (QAL) Module
 
-This module implements the Quantization Adaptation Layer, which adapts the
-feature maps produced by the ST-NPP module based on the quantization parameter (QP)
-of the downstream video codec.
+This module implements the Quantization Adaptation Layer (QAL) that bridges
+neural representations with traditional video codecs. It adapts the neural
+features produced by the ST-NPP module to the quantization characteristics
+of standard codecs like HEVC/VVC.
+
+Key features:
+1. QP-conditional processing
+2. Importance map generation for bit allocation
+3. Differentiable quantization with learnable centers
+4. Temporal context modeling
+5. Rate-distortion optimization
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Union, Tuple
+import math
+
+
+class SoftQuantizer(nn.Module):
+    """
+    Differentiable soft quantization module with learnable centers
+    """
+    def __init__(self, num_centers=16, init_range=(-1, 1), temperature=1.0):
+        """
+        Initialize soft quantizer with learnable centers
+        
+        Args:
+            num_centers: Number of quantization centers
+            init_range: Range for initializing centers
+            temperature: Temperature for softmax (lower = harder quantization)
+        """
+        super(SoftQuantizer, self).__init__()
+        
+        # Initialize quantization centers
+        centers = torch.linspace(init_range[0], init_range[1], num_centers)
+        self.register_parameter("centers", nn.Parameter(centers))
+        
+        # Temperature parameter for softmax-based soft assignment
+        self.temperature = temperature
+        self.num_centers = num_centers
+        
+    def forward(self, x, hard=False):
+        """
+        Forward pass with soft or hard quantization
+        
+        Args:
+            x: Input tensor to quantize
+            hard: Whether to use hard quantization (for inference)
+            
+        Returns:
+            Quantized tensor and soft assignment probabilities
+        """
+        # Get input shape
+        input_shape = x.shape
+        
+        # Reshape input to [N, 1] where N is the total number of elements
+        x_flat = x.reshape(-1, 1)
+        
+        # Calculate distances to centers
+        dist = torch.abs(x_flat - self.centers.view(1, -1))
+        
+        if hard:
+            # Hard assignment (nearest center)
+            _, indices = torch.min(dist, dim=1)
+            quant = self.centers[indices].view(-1, 1)
+            
+            # One-hot encoding of assignments
+            assign = torch.zeros(x_flat.size(0), self.num_centers, device=x.device)
+            assign.scatter_(1, indices.unsqueeze(1), 1)
+        else:
+            # Soft assignment using softmax
+            assign = F.softmax(-dist / self.temperature, dim=1)
+            
+            # Weighted sum of centers
+            quant = torch.matmul(assign, self.centers.view(-1, 1))
+            
+        # Reshape quantized values back to input shape
+        quant = quant.reshape(input_shape)
+        
+        # For straight-through gradient estimation during training
+        if not hard:
+            # Pass through gradients from quant to x
+            quant_st = x + (quant - x).detach()
+        else:
+            quant_st = quant
+            
+        # Reshape assignments for return
+        assign = assign.reshape(*input_shape, self.num_centers)
+        
+        return quant_st, assign
+    
+    def get_rate(self, assign):
+        """
+        Estimate rate (bits) from soft assignments
+        
+        Args:
+            assign: Soft assignment probabilities
+            
+        Returns:
+            Estimated bits required for encoding
+        """
+        # Calculate entropy of assignments
+        # assign has shape [..., num_centers]
+        eps = 1e-10
+        entropy = -torch.sum(assign * torch.log2(assign + eps), dim=-1)
+        
+        # Return average entropy
+        return entropy.mean()
+
+
+class QALModule(nn.Module):
+    """
+    Core Quantization Adaptation Layer module for individual frames
+    """
+    def __init__(self, channels, qp_levels=51, hidden_dim=128):
+        """
+        Initialize QAL module
+        
+        Args:
+            channels: Number of input/output channels
+            qp_levels: Number of QP levels to support (typically 0-51 for H.264/HEVC)
+            hidden_dim: Dimension of hidden layers
+        """
+        super(QALModule, self).__init__()
+        
+        self.channels = channels
+        self.qp_levels = qp_levels
+        self.hidden_dim = hidden_dim
+        
+        # QP embedding
+        self.qp_embedding = nn.Embedding(qp_levels, hidden_dim)
+        
+        # QP conditioning network
+        self.qp_adapter = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(hidden_dim, channels * 2)  # Scale and bias
+        )
+        
+        # Feature transform network
+        self.feature_transform = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        
+        # Importance map generator for adaptive bit allocation
+        self.importance_map = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(channels, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Differentiable quantizer
+        self.quantizer = SoftQuantizer(num_centers=16, temperature=0.5)
+        
+    def forward(self, x, qp, training=True):
+        """
+        Forward pass
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            qp: Quantization parameter (0-51)
+            training: Whether in training mode
+            
+        Returns:
+            Quantized tensor and rate estimate
+        """
+        batch_size = x.size(0)
+        
+        # QP conditioning
+        qp_embed = self.qp_embedding(qp)  # [B, hidden_dim]
+        qp_params = self.qp_adapter(qp_embed)  # [B, channels*2]
+        
+        # Split into scale and bias
+        scale, bias = torch.split(qp_params, self.channels, dim=1)
+        scale = scale.view(batch_size, self.channels, 1, 1)
+        bias = bias.view(batch_size, self.channels, 1, 1)
+        
+        # Apply feature transformation
+        x = self.feature_transform(x)
+        
+        # Apply QP-conditional scaling
+        x = x * scale + bias
+        
+        # Generate importance map
+        importance = self.importance_map(x)
+        
+        # Apply scaled quantization according to importance
+        # Higher importance = finer quantization
+        x_scaled = x * importance
+        quant, assign = self.quantizer(x_scaled, hard=not training)
+        
+        # Rescale back
+        quant = quant / (importance + 1e-8)
+        
+        # Estimate rate
+        rate = self.quantizer.get_rate(assign)
+        
+        return quant, rate, importance
 
 
 class QAL(nn.Module):
     """
-    Quantization Adaptation Layer (QAL)
-    
-    This layer adapts the feature maps based on the quantization parameter (QP)
-    to optimize the trade-off between rate and distortion under different
-    compression levels.
+    Complete Quantization Adaptation Layer with temporal context
     """
-    
-    def __init__(self, feature_channels: int = 128, hidden_dim: int = 64):
+    def __init__(self, channels, qp_levels=51, temporal_kernel_size=3):
         """
-        Initialize the Quantization Adaptation Layer.
+        Initialize QAL
         
         Args:
-            feature_channels: Number of channels in the feature maps to adapt
-            hidden_dim: Dimension of the hidden layers in the MLP
+            channels: Number of input/output channels
+            qp_levels: Number of QP levels to support
+            temporal_kernel_size: Size of temporal kernel for context
         """
         super(QAL, self).__init__()
         
-        # MLP to predict scaling factors based on QP
-        self.mlp = nn.Sequential(
-            nn.Linear(1, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, feature_channels),
-            nn.Sigmoid()  # Scale factors between 0 and 1
+        self.channels = channels
+        self.qp_levels = qp_levels
+        self.temporal_kernel_size = temporal_kernel_size
+        
+        # Temporal context module
+        padding = (temporal_kernel_size - 1) // 2
+        self.temporal_context = nn.Conv3d(
+            channels, channels,
+            kernel_size=(temporal_kernel_size, 1, 1),
+            padding=(padding, 0, 0)
         )
         
-    def forward(self, features: torch.Tensor, 
-                qp: Union[torch.Tensor, float, int]) -> torch.Tensor:
+        # Frame-level QAL module
+        self.qal_module = QALModule(channels, qp_levels)
+        
+        # Output transform
+        self.output_transform = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        
+    def forward(self, x, qp, training=True):
         """
-        Forward pass to apply scaling based on QP to the input features.
+        Forward pass
         
         Args:
-            features: Feature tensor to apply scaling (B, C, T, H, W)
-            qp: Quantization Parameter (scalar or batch of scalars)
+            x: Input tensor [B, C, T, H, W]
+            qp: Quantization parameter (0-51) or tensor of parameters
+            training: Whether in training mode
             
         Returns:
-            Scaled features (B, C, T, H, W)
+            Quantized tensor, rate estimate, and importance maps
         """
-        # Ensure QP is a tensor with the right shape
-        if not isinstance(qp, torch.Tensor):
-            qp = torch.tensor([qp], dtype=torch.float32, device=features.device)
+        batch_size, channels, time, height, width = x.shape
         
-        if qp.dim() == 0:  # Handle scalar tensor
-            qp = qp.unsqueeze(0)
+        # Ensure QP is a tensor
+        if isinstance(qp, int):
+            qp = torch.tensor([qp] * batch_size, device=x.device)
         
-        if qp.dim() == 1:  # Handle 1D tensor (batch of scalars)
-            qp = qp.unsqueeze(1)  # Shape: (B, 1)
+        # Apply temporal context
+        x_temporal = self.temporal_context(x)
         
-        # Generate scale factors
-        scale_factors = self.mlp(qp)  # Shape: (B, feature_channels)
+        # Process each frame with QAL
+        outputs = []
+        rates = []
+        importance_maps = []
         
-        # Check batch size consistency
-        assert scale_factors.size(0) == features.size(0), \
-            f"Batch size mismatch: scale_factors ({scale_factors.size(0)}) " \
-            f"vs features ({features.size(0)})"
+        for t in range(time):
+            # Extract frame with temporal context
+            x_t = x_temporal[:, :, t]
+            
+            # Apply QAL module
+            quant_t, rate_t, importance_t = self.qal_module(x_t, qp, training)
+            
+            # Apply output transform
+            out_t = self.output_transform(quant_t)
+            
+            # Store results
+            outputs.append(out_t)
+            rates.append(rate_t)
+            importance_maps.append(importance_t)
+            
+        # Stack outputs along temporal dimension
+        output = torch.stack(outputs, dim=2)
+        importance = torch.stack(importance_maps, dim=2)
         
-        # Reshape scale factors to match feature dimensions for broadcasting
-        B, C = scale_factors.shape
+        # Average rate across frames
+        rate = torch.stack(rates).mean()
         
-        if features.dim() == 5:  # (B, C, T, H, W)
-            scale_factors = scale_factors.view(B, C, 1, 1, 1)
-        else:  # (B, C, H, W)
-            scale_factors = scale_factors.view(B, C, 1, 1)
-        
-        # Apply scaling
-        scaled_features = features * scale_factors
-        return scaled_features
-
-
-class ConditionalQAL(nn.Module):
-    """
-    Conditional Quantization Adaptation Layer
+        return output, rate, importance
     
-    An enhanced version of QAL that adapts features based on both QP and
-    local spatial-temporal characteristics of the features.
-    """
-    
-    def __init__(self, feature_channels: int = 128, hidden_dim: int = 64, 
-                 kernel_size: int = 3, temporal_kernel_size: int = 3):
+    def compress(self, x, target_bpp, max_qp=51, min_qp=0, tolerance=0.1):
         """
-        Initialize the Conditional Quantization Adaptation Layer.
+        Compress with target bitrate using binary search on QP
         
         Args:
-            feature_channels: Number of channels in the feature maps to adapt
-            hidden_dim: Dimension of the hidden layers
-            kernel_size: Spatial kernel size for convolution
-            temporal_kernel_size: Temporal kernel size for 3D convolution
-        """
-        super(ConditionalQAL, self).__init__()
-        
-        # QP encoding
-        self.qp_encoder = nn.Sequential(
-            nn.Linear(1, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Feature context encoding (spatial-temporal)
-        self.context_encoder = nn.Sequential(
-            nn.Conv3d(
-                feature_channels, 
-                hidden_dim, 
-                kernel_size=(temporal_kernel_size, kernel_size, kernel_size),
-                padding=(temporal_kernel_size//2, kernel_size//2, kernel_size//2)
-            ),
-            nn.BatchNorm3d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(
-                hidden_dim, 
-                hidden_dim, 
-                kernel_size=1
-            ),
-            nn.BatchNorm3d(hidden_dim),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Feature pooling for global context
-        self.global_pool = nn.AdaptiveAvgPool3d(1)
-        
-        # Fusion of QP and feature context
-        self.fusion = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, feature_channels),
-            nn.Sigmoid()
-        )
-        
-    def forward(self, features: torch.Tensor, 
-                qp: Union[torch.Tensor, float, int]) -> torch.Tensor:
-        """
-        Forward pass to generate conditional scale factors and apply them.
-        
-        Args:
-            features: Feature tensor to analyze and scale (B, C, T, H, W)
-            qp: Quantization Parameter (scalar or batch of scalars)
+            x: Input tensor [B, C, T, H, W]
+            target_bpp: Target bits per pixel
+            max_qp: Maximum QP value to try
+            min_qp: Minimum QP value to try
+            tolerance: Acceptable deviation from target bitrate
             
         Returns:
-            Scaled features (B, C, T, H, W)
+            Compressed tensor, actual bitrate, and QP value used
         """
-        B, C, T, H, W = features.shape
+        device = x.device
+        batch_size = x.size(0)
         
-        # Ensure QP is a tensor with the right shape
-        if not isinstance(qp, torch.Tensor):
-            qp = torch.tensor([qp], dtype=torch.float32, device=features.device)
+        # Start with middle QP
+        low_qp = min_qp
+        high_qp = max_qp
         
-        if qp.dim() == 0:  # Handle scalar tensor
-            qp = qp.unsqueeze(0)
-        
-        if qp.dim() == 1:  # Handle 1D tensor (batch of scalars)
-            qp = qp.unsqueeze(1)  # Shape: (B, 1)
-        
-        # Ensure QP is on the same device as features
-        qp = qp.to(features.device)
-        
-        # Encode QP
-        qp_feat = self.qp_encoder(qp)  # (B, hidden_dim)
-        
-        # Encode feature context
-        context_feat = self.context_encoder(features)  # (B, hidden_dim, T, H, W)
-        
-        # Pool to get global context
-        global_context = self.global_pool(context_feat).view(B, -1)  # (B, hidden_dim)
-        
-        # Fuse QP and context features
-        fused = torch.cat([qp_feat, global_context], dim=1)  # (B, hidden_dim*2)
-        scale_factors = self.fusion(fused)  # (B, C)
-        
-        # Reshape scale factors for broadcasting
-        scale_factors = scale_factors.view(B, C, 1, 1, 1)
-        
-        # Apply scaling
-        scaled_features = features * scale_factors
-        
-        return scaled_features
-
-
-class PixelwiseQAL(nn.Module):
-    """
-    Pixelwise Quantization Adaptation Layer
-    
-    This version of QAL generates different scale factors for different
-    positions in the feature map, allowing for more fine-grained adaptation.
-    """
-    
-    def __init__(self, feature_channels: int = 128, hidden_dim: int = 64):
-        """
-        Initialize the Pixelwise Quantization Adaptation Layer.
-        
-        Args:
-            feature_channels: Number of channels in the feature maps to adapt
-            hidden_dim: Dimension of the hidden layers
-        """
-        super(PixelwiseQAL, self).__init__()
-        
-        # QP encoding
-        self.qp_encoder = nn.Sequential(
-            nn.Linear(1, hidden_dim),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Scale factor generator network
-        self.scale_generator = nn.Sequential(
-            nn.Conv3d(feature_channels + 1, hidden_dim, kernel_size=3, padding=1),
-            nn.BatchNorm3d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
-            nn.BatchNorm3d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(hidden_dim, feature_channels, kernel_size=1),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, features: torch.Tensor, 
-                qp: Union[torch.Tensor, float, int]) -> torch.Tensor:
-        """
-        Forward pass to generate pixelwise scale factors and apply them.
-        
-        Args:
-            features: Feature tensor to analyze and scale (B, C, T, H, W)
-            qp: Quantization Parameter (scalar or batch of scalars)
+        # Binary search for appropriate QP
+        for _ in range(10):  # Max 10 iterations
+            mid_qp = (low_qp + high_qp) // 2
+            qp = torch.tensor([mid_qp] * batch_size, device=device)
             
-        Returns:
-            Scaled features (B, C, T, H, W)
-        """
-        B, C, T, H, W = features.shape
-        
-        # Ensure QP is a tensor with the right shape
-        if not isinstance(qp, torch.Tensor):
-            qp = torch.tensor([qp], dtype=torch.float32, device=features.device)
-        
-        if qp.dim() == 0:  # Handle scalar tensor
-            qp = qp.unsqueeze(0)
-        
-        if qp.dim() == 1:  # Handle 1D tensor (batch of scalars)
-            qp = qp.unsqueeze(1)  # Shape: (B, 1)
-        
-        # Ensure QP is on the same device as features
-        qp = qp.to(features.device)
-        
-        # Create QP feature map (broadcast QP to feature map dimensions)
-        qp_map = qp.view(B, 1, 1, 1, 1).expand(B, 1, T, H, W)
-        
-        # Concatenate features and QP map along channel dimension
-        concat_features = torch.cat([features, qp_map], dim=1)  # (B, C+1, T, H, W)
-        
-        # Generate pixelwise scale factors
-        scale_map = self.scale_generator(concat_features)  # (B, C, T, H, W)
-        
-        # Apply scaling
-        scaled_features = features * scale_map
-        
-        return scaled_features
+            # Compress with current QP
+            with torch.no_grad():
+                output, rate, _ = self(x, qp, training=False)
+            
+            # Check if bitrate is close enough to target
+            if abs(rate.item() - target_bpp) < tolerance:
+                break
+                
+            # Adjust QP range
+            if rate.item() > target_bpp:
+                # Too many bits, increase QP (reduce quality)
+                low_qp = mid_qp
+            else:
+                # Too few bits, decrease QP (increase quality)
+                high_qp = mid_qp
+                
+            # Check if search range is exhausted
+            if high_qp - low_qp <= 1:
+                break
+                
+        # Final compression with selected QP
+        with torch.no_grad():
+            output, rate, importance = self(x, qp, training=False)
+            
+        return output, rate, mid_qp, importance
 
 
-def test_qal():
-    """Test function to verify QAL implementations."""
-    # Create a random feature tensor
+# Test code
+if __name__ == "__main__":
+    # Parameters for testing
     batch_size = 2
-    channels = 128
-    time_steps = 16
+    channels = 32
+    time_steps = 8
     height = 64
     width = 64
     
-    features = torch.randn(batch_size, channels, time_steps, height, width)
-    qp = torch.tensor([23, 37], dtype=torch.float32)  # Different QP for each batch item
+    # Test QAL module (frame level)
+    qal_module = QALModule(channels)
     
-    # Test standard QAL
-    print("Testing standard QAL...")
-    qal = QAL(feature_channels=channels)
-    scaled_features = qal(features, qp)
+    # Create random input for a single frame
+    x_frame = torch.randn(batch_size, channels, height, width)
+    qp = torch.tensor([30, 40])  # Different QP for each example
     
-    print(f"QP shape: {qp.shape}")
-    print(f"Scaled features shape: {scaled_features.shape}")
-    print(f"Scale factor range: {scaled_features.min().item():.4f} - {scaled_features.max().item():.4f}")
+    # Forward pass
+    quant_frame, rate_frame, importance_frame = qal_module(x_frame, qp)
     
-    # Test conditional QAL
-    print("\nTesting conditional QAL...")
-    cqal = ConditionalQAL(feature_channels=channels)
-    cond_scaled_features = cqal(features, qp)
+    # Print shapes and metrics
+    print(f"Frame input shape: {x_frame.shape}")
+    print(f"Frame output shape: {quant_frame.shape}")
+    print(f"Frame importance map shape: {importance_frame.shape}")
+    print(f"Frame estimated rate: {rate_frame.item():.4f} bits per element")
     
-    print(f"Conditionally scaled features shape: {cond_scaled_features.shape}")
+    # Test complete QAL (with temporal context)
+    qal = QAL(channels)
     
-    # Test pixelwise QAL
-    print("\nTesting pixelwise QAL...")
-    pqal = PixelwiseQAL(feature_channels=channels)
-    pw_scaled_features = pqal(features, qp)
+    # Create random input for video
+    x_video = torch.randn(batch_size, channels, time_steps, height, width)
     
-    print(f"Pixelwise scaled features shape: {pw_scaled_features.shape}")
+    # Forward pass
+    quant_video, rate_video, importance_video = qal(x_video, qp)
     
-    return True
-
-
-if __name__ == "__main__":
-    test_qal() 
+    # Print shapes and metrics
+    print(f"\nVideo input shape: {x_video.shape}")
+    print(f"Video output shape: {quant_video.shape}")
+    print(f"Video importance map shape: {importance_video.shape}")
+    print(f"Video estimated rate: {rate_video.item():.4f} bits per element")
+    
+    # Test compression with target bitrate
+    target_bpp = 1.0
+    compressed, actual_bpp, used_qp, importance = qal.compress(x_video, target_bpp)
+    
+    # Print results
+    print(f"\nTarget bitrate: {target_bpp:.2f} bpp")
+    print(f"Actual bitrate: {actual_bpp.item():.2f} bpp")
+    print(f"QP value used: {used_qp}")
+    print(f"Compressed output shape: {compressed.shape}")
+    
+    # Calculate reconstruction error
+    mse = F.mse_loss(x_video, compressed)
+    psnr = -10 * torch.log10(mse)
+    print(f"Reconstruction MSE: {mse.item():.6f}")
+    print(f"Reconstruction PSNR: {psnr.item():.2f} dB") 
