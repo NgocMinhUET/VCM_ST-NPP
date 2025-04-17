@@ -108,7 +108,7 @@ def calculate_ms_ssim(original, compressed):
 
 def compress_with_our_method(frames, args, device, qp_level=None):
     """Compress frames using our improved autoencoder method with different QP levels."""
-    print(f"Compressing with our improved autoencoder (QP level: {qp_level if qp_level is not None else 'default'})...")
+    print(f"\nCompressing with our improved autoencoder (QP level: {qp_level if qp_level is not None else 'default'})...")
     start_time = time.time()
     
     try:
@@ -144,22 +144,31 @@ def compress_with_our_method(frames, args, device, qp_level=None):
         ).to(device)
         
         try:
-            # Suppress excessive output during model loading
-            original_stdout = sys.stdout
-            sys.stdout = open(os.devnull, 'w')
+            # Redirect stderr to suppress PyTorch messages
+            stderr = sys.stderr
+            sys.stderr = open(os.devnull, 'w')
             
+            # Load checkpoint
             checkpoint = torch.load(args.model_path, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
             
-            # Restore stdout
-            sys.stdout = original_stdout
+            # Custom load_state_dict to suppress missing key messages
+            model_dict = model.state_dict()
+            pretrained_dict = {k: v for k, v in checkpoint['model_state_dict'].items() if k in model_dict}
+            model_dict.update(pretrained_dict)
+            model.load_state_dict(model_dict)
+            
+            # Restore stderr
+            sys.stderr.close()
+            sys.stderr = stderr
             
             print("Model loaded successfully")
             model.eval()
             
         except Exception as e:
-            sys.stdout = original_stdout  # Ensure stdout is restored
-            print(f"Error loading model: {e}")
+            if 'stderr' in locals():
+                sys.stderr.close()
+                sys.stderr = stderr
+            print(f"Error loading model: {str(e)}")
             return None, None, None
         
         print(f"Processing {len(frames)} frames in batches of {args.time_steps}...")
@@ -167,55 +176,59 @@ def compress_with_our_method(frames, args, device, qp_level=None):
         latent_sizes = []
         
         # Process frames in batches of time_steps
-        for i in tqdm(range(0, len(frames), args.time_steps)):
-            # Get sequence
-            sequence = frames[i:i+args.time_steps]
-            if len(sequence) < args.time_steps:
-                # Pad the sequence if necessary
-                sequence = sequence + [sequence[-1]] * (args.time_steps - len(sequence))
-            
-            try:
-                # Create tensor [B, C, T, H, W]
-                sequence_tensor = torch.zeros((1, 3, len(sequence), sequence[0].shape[0], sequence[0].shape[1]), 
-                                          device=device)
-                
-                for t, frame in enumerate(sequence):
-                    # Convert BGR to RGB and normalize to [0, 1]
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frame_tensor = torch.from_numpy(frame_rgb).float().permute(2, 0, 1) / 255.0
-                    sequence_tensor[0, :, t, :, :] = frame_tensor.to(device)
-                
-                # Compress and reconstruct
-                with torch.no_grad():
-                    reconstructed, latent, _ = model(sequence_tensor)
+        with tqdm(total=len(frames), desc="Compressing frames") as pbar:
+            for i in range(0, len(frames), args.time_steps):
+                try:
+                    # Get sequence
+                    sequence = frames[i:i+args.time_steps]
+                    if len(sequence) < args.time_steps:
+                        # Pad the sequence if necessary
+                        sequence = sequence + [sequence[-1]] * (args.time_steps - len(sequence))
                     
-                    # Get compressed size in bytes
-                    latent_cpu = latent.cpu().numpy()
-                    latent_sizes.append(latent_cpu.nbytes)
-                
-                # Convert back to numpy
-                reconstructed_np = reconstructed.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()
-                
-                # Convert from RGB back to BGR for OpenCV
-                reconstructed_frames = []
-                for t in range(reconstructed_np.shape[0]):
-                    # Convert normalized RGB [0,1] to BGR [0,255]
-                    frame_rgb = (reconstructed_np[t] * 255).astype(np.uint8)
-                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-                    reconstructed_frames.append(frame_bgr)
-                
-                # Store actual frames
-                if i + args.time_steps > len(frames):
-                    compressed_frames.extend(reconstructed_frames[:len(frames)-i])
-                else:
-                    compressed_frames.extend(reconstructed_frames)
+                    # Create tensor [B, C, T, H, W]
+                    sequence_tensor = torch.zeros((1, 3, len(sequence), sequence[0].shape[0], sequence[0].shape[1]), 
+                                              device=device)
                     
-            except Exception as e:
-                print(f"Error processing batch starting at frame {i}: {e}")
-                return None, None, None
+                    for t, frame in enumerate(sequence):
+                        # Convert BGR to RGB and normalize to [0, 1]
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        frame_tensor = torch.from_numpy(frame_rgb).float().permute(2, 0, 1) / 255.0
+                        sequence_tensor[0, :, t, :, :] = frame_tensor.to(device)
+                    
+                    # Compress and reconstruct
+                    with torch.no_grad():
+                        reconstructed, latent, _ = model(sequence_tensor)
+                        
+                        # Get compressed size in bytes
+                        latent_cpu = latent.cpu().numpy()
+                        latent_sizes.append(latent_cpu.nbytes)
+                    
+                    # Convert back to numpy
+                    reconstructed_np = reconstructed.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()
+                    
+                    # Convert from RGB back to BGR for OpenCV
+                    reconstructed_frames = []
+                    for t in range(reconstructed_np.shape[0]):
+                        # Convert normalized RGB [0,1] to BGR [0,255]
+                        frame_rgb = (reconstructed_np[t] * 255).astype(np.uint8)
+                        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                        reconstructed_frames.append(frame_bgr)
+                    
+                    # Store actual frames
+                    if i + args.time_steps > len(frames):
+                        compressed_frames.extend(reconstructed_frames[:len(frames)-i])
+                    else:
+                        compressed_frames.extend(reconstructed_frames)
+                    
+                    # Update progress bar
+                    pbar.update(min(args.time_steps, len(frames) - i))
+                        
+                except Exception as e:
+                    print(f"\nError processing batch starting at frame {i}: {str(e)}")
+                    return None, None, None
         
         compression_time = time.time() - start_time
-        print(f"Compression completed in {compression_time:.2f} seconds")
+        print(f"\nCompression completed in {compression_time:.2f} seconds")
         
         # Calculate total compressed size
         total_compressed_size = sum(latent_sizes)
@@ -224,7 +237,7 @@ def compress_with_our_method(frames, args, device, qp_level=None):
         return compressed_frames, total_compressed_size, compression_time
         
     except Exception as e:
-        print(f"Error in compression process: {e}")
+        print(f"\nError in compression process: {str(e)}")
         import traceback
         traceback.print_exc()
         return None, None, None
