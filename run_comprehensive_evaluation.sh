@@ -48,7 +48,10 @@ echo "Step 1: Comparing video compression methods..."
 python compare_compression_methods.py \
     --input_video "$VIDEO_PATH" \
     --model_path "$STNPP_MODEL" \
-    --output_dir results/compression_test
+    --output_dir results/compression_test \
+    --latent_channels 8 \
+    --time_steps 16 \
+    --time_reduction 4
 
 # Check if compression comparison was successful
 if [ $? -ne 0 ]; then

@@ -723,15 +723,9 @@ def main():
         method_name = f"our_method_qp{qp}"
         print(f"\nTesting {method_name}...")
         
-        if args.use_sample_data:
-            # Use sample data for testing
-            sample_data = generate_sample_data()
-            if method_name in sample_data:
-                results[method_name] = sample_data[method_name]
-            continue
-        
         # Get device
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device}")
         
         # Compress frames
         compressed_frames, compressed_size, compression_time = compress_with_our_method(
