@@ -663,34 +663,20 @@ def generate_sample_data():
     
     return sample_results
 
-def check_encoder_packages():
-    """Check if required encoder packages are installed."""
+def check_ffmpeg_codecs():
     try:
-        # Check for x264
-        x264_result = subprocess.run(["pkg-config", "--exists", "x264"],
-                                   stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE)
-        has_x264_dev = x264_result.returncode == 0
+        output = subprocess.run(["ffmpeg", "-codecs"], capture_output=True, text=True).stdout
+        if "libx264" in output:
+            print("FFmpeg supports libx264 ✅")
+        else:
+            print("⚠️ FFmpeg does NOT support libx264")
 
-        # Check for x265
-        x265_result = subprocess.run(["pkg-config", "--exists", "x265"],
-                                   stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE)
-        has_x265_dev = x265_result.returncode == 0
-
-        if not (has_x264_dev and has_x265_dev):
-            print("\nMissing encoder development packages:")
-            if not has_x264_dev:
-                print("- x264 development package not found")
-            if not has_x265_dev:
-                print("- x265 development package not found")
-            print("\nPlease install the required packages:")
-            print("  Ubuntu/Debian: sudo apt-get install libx264-dev libx265-dev")
-            print("  CentOS/RHEL: sudo yum install x264-devel x265-devel")
-            print("  macOS: brew install x264 x265")
-    except FileNotFoundError:
-        # pkg-config not found, skip this check
-        pass
+        if "libx265" in output:
+            print("FFmpeg supports libx265 ✅")
+        else:
+            print("⚠️ FFmpeg does NOT support libx265")
+    except Exception as e:
+        print("Error checking ffmpeg codecs:", e)
 
 def generate_summary_table(results, output_dir):
     """Generate a summary table of compression results."""
@@ -718,7 +704,7 @@ def main():
     # Check for FFmpeg and codecs
     print("Checking FFmpeg and codecs...")
     check_ffmpeg()
-    check_encoder_packages()
+    check_ffmpeg_codecs()
     
     # Load video frames
     print("\nLoading video frames...")
