@@ -314,65 +314,80 @@ def calculate_mota(original_frames, compressed_frames):
         
         total_frames = len(original_frames)
         if total_frames == 0:
+            print("No frames to process")
             return 0.0
             
         total_score = 0.0
+        processed_frames = 0
         
-        for orig_frame, comp_frame in zip(original_frames, compressed_frames):
-            # Convert frames to grayscale
-            orig_gray = cv2.cvtColor(orig_frame, cv2.COLOR_BGR2GRAY)
-            comp_gray = cv2.cvtColor(comp_frame, cv2.COLOR_BGR2GRAY)
-            
-            # Use FAST feature detector
-            fast = cv2.FastFeatureDetector_create(
-                threshold=20,
-                nonmaxSuppression=True
-            )
-            
-            # Detect keypoints
-            kp1 = fast.detect(orig_gray, None)
-            kp2 = fast.detect(comp_gray, None)
-            
-            if not kp1 or not kp2:
-                continue
-                
-            # Convert keypoints to numpy arrays
-            pts1 = np.array([kp.pt for kp in kp1], dtype=np.float32)
-            pts2 = np.array([kp.pt for kp in kp2], dtype=np.float32)
-            
-            if len(pts1) == 0 or len(pts2) == 0:
-                continue
-                
-            # Calculate frame score based on keypoint matching
+        # Create ORB detector
+        orb = cv2.ORB_create(
+            nfeatures=1000,
+            scaleFactor=1.2,
+            nlevels=8,
+            edgeThreshold=31,
+            firstLevel=0,
+            WTA_K=2,
+            scoreType=cv2.ORB_HARRIS_SCORE,
+            patchSize=31,
+            fastThreshold=20
+        )
+        
+        # Create BFMatcher object
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        
+        print("\nCalculating MOTA...")
+        for frame_idx, (orig_frame, comp_frame) in enumerate(zip(original_frames, compressed_frames)):
             try:
-                # Use BFMatcher with default params
-                bf = cv2.BFMatcher()
-                matches = bf.knnMatch(
-                    pts1.reshape(-1, 2),
-                    pts2.reshape(-1, 2),
-                    k=2
-                )
+                # Convert frames to grayscale
+                orig_gray = cv2.cvtColor(orig_frame, cv2.COLOR_BGR2GRAY)
+                comp_gray = cv2.cvtColor(comp_frame, cv2.COLOR_BGR2GRAY)
                 
-                # Apply ratio test
-                good_matches = []
-                for m, n in matches:
-                    if m.distance < 0.75 * n.distance:
-                        good_matches.append(m)
+                # Detect and compute keypoints and descriptors
+                kp1, des1 = orb.detectAndCompute(orig_gray, None)
+                kp2, des2 = orb.detectAndCompute(comp_gray, None)
                 
-                # Calculate frame score
-                frame_score = len(good_matches) / max(len(pts1), len(pts2))
-                total_score += frame_score
+                if des1 is None or des2 is None or len(kp1) < 2 or len(kp2) < 2:
+                    print(f"Frame {frame_idx}: Not enough keypoints detected")
+                    continue
+                
+                # Match descriptors
+                matches = bf.match(des1, des2)
+                
+                # Sort them in order of distance
+                matches = sorted(matches, key=lambda x: x.distance)
+                
+                # Calculate ratio of good matches
+                good_matches = [m for m in matches if m.distance < 50]  # Adjust threshold if needed
+                match_ratio = len(good_matches) / max(len(kp1), len(kp2))
+                
+                if frame_idx % 10 == 0:  # Print every 10th frame
+                    print(f"Frame {frame_idx}: Found {len(kp1)} / {len(kp2)} keypoints, "
+                          f"{len(good_matches)} good matches, score = {match_ratio:.4f}")
+                
+                total_score += match_ratio
+                processed_frames += 1
                 
             except Exception as e:
-                print(f"Error in frame matching: {str(e)}")
+                print(f"Error processing frame {frame_idx}: {str(e)}")
                 continue
         
+        if processed_frames == 0:
+            print("No frames were successfully processed")
+            return 0.0
+            
         # Calculate final MOTA score
-        mota = total_score / total_frames if total_frames > 0 else 0.0
+        mota = total_score / processed_frames
+        print(f"\nMOTA calculation completed:")
+        print(f"Processed frames: {processed_frames}/{total_frames}")
+        print(f"Average score: {mota:.4f}")
+        
         return max(0.0, min(1.0, mota))  # Clamp between 0 and 1
         
     except Exception as e:
         print(f"Error calculating MOTA: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return 0.0
 
 def evaluate_compression(original_frames, compressed_frames, compressed_size):
