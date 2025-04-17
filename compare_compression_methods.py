@@ -320,21 +320,20 @@ def calculate_mota(original_frames, compressed_frames):
         total_score = 0.0
         processed_frames = 0
         
-        # Create ORB detector
-        orb = cv2.ORB_create(
-            nfeatures=1000,
-            scaleFactor=1.2,
-            nlevels=8,
-            edgeThreshold=31,
-            firstLevel=0,
-            WTA_K=2,
-            scoreType=cv2.ORB_HARRIS_SCORE,
-            patchSize=31,
-            fastThreshold=20
+        # Create SIFT detector
+        sift = cv2.SIFT_create(
+            nfeatures=0,  # 0 means unlimited
+            nOctaveLayers=3,
+            contrastThreshold=0.02,  # Lower value to detect more features
+            edgeThreshold=10,
+            sigma=1.6
         )
         
-        # Create BFMatcher object
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        # Create FLANN matcher
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        flann = cv2.FlannBasedMatcher(index_params, search_params)
         
         print("\nCalculating MOTA...")
         for frame_idx, (orig_frame, comp_frame) in enumerate(zip(original_frames, compressed_frames)):
@@ -343,22 +342,37 @@ def calculate_mota(original_frames, compressed_frames):
                 orig_gray = cv2.cvtColor(orig_frame, cv2.COLOR_BGR2GRAY)
                 comp_gray = cv2.cvtColor(comp_frame, cv2.COLOR_BGR2GRAY)
                 
+                # Apply histogram equalization to enhance features
+                orig_gray = cv2.equalizeHist(orig_gray)
+                comp_gray = cv2.equalizeHist(comp_gray)
+                
                 # Detect and compute keypoints and descriptors
-                kp1, des1 = orb.detectAndCompute(orig_gray, None)
-                kp2, des2 = orb.detectAndCompute(comp_gray, None)
+                kp1, des1 = sift.detectAndCompute(orig_gray, None)
+                kp2, des2 = sift.detectAndCompute(comp_gray, None)
                 
                 if des1 is None or des2 is None or len(kp1) < 2 or len(kp2) < 2:
-                    print(f"Frame {frame_idx}: Not enough keypoints detected")
+                    print(f"Frame {frame_idx}: Not enough keypoints detected "
+                          f"(orig: {len(kp1) if kp1 else 0}, comp: {len(kp2) if kp2 else 0})")
                     continue
                 
-                # Match descriptors
-                matches = bf.match(des1, des2)
+                # Convert descriptors to float32
+                des1 = np.float32(des1)
+                des2 = np.float32(des2)
                 
-                # Sort them in order of distance
-                matches = sorted(matches, key=lambda x: x.distance)
+                # Find matches using FLANN
+                try:
+                    matches = flann.knnMatch(des1, des2, k=2)
+                except Exception as e:
+                    print(f"Frame {frame_idx}: Error in matching - {str(e)}")
+                    continue
                 
-                # Calculate ratio of good matches
-                good_matches = [m for m in matches if m.distance < 50]  # Adjust threshold if needed
+                # Apply Lowe's ratio test with a more lenient ratio
+                good_matches = []
+                for i, (m, n) in enumerate(matches):
+                    if m.distance < 0.85 * n.distance:  # More lenient ratio (0.85 instead of 0.75)
+                        good_matches.append(m)
+                
+                # Calculate match ratio
                 match_ratio = len(good_matches) / max(len(kp1), len(kp2))
                 
                 if frame_idx % 10 == 0:  # Print every 10th frame
