@@ -111,96 +111,123 @@ def compress_with_our_method(frames, args, device, qp_level=None):
     print(f"Compressing with our improved autoencoder (QP level: {qp_level if qp_level is not None else 'default'})...")
     start_time = time.time()
     
-    # Flag to determine whether to use different num_embeddings values
-    FLAG_USE_QP_LEVELS = True
-    
-    # Adjust quantization parameters based on QP level
-    if FLAG_USE_QP_LEVELS and qp_level is not None:
-        if qp_level == 1:
-            latent_channels = 8  # Default setting
-            num_embeddings = 512
-        elif qp_level == 2:
-            latent_channels = 8
-            num_embeddings = 256  # Fewer codebook entries = more compression
-        elif qp_level == 3:
-            latent_channels = 8
-            num_embeddings = 128  # Even fewer entries = even more compression
-        else:
-            latent_channels = args.latent_channels
-            num_embeddings = 512  # Default
-    else:
-        # Default values for all cases if flag is off
-        latent_channels = args.latent_channels
-        num_embeddings = 512
-    
-    # Load model
-    model = ImprovedAutoencoder(
-        input_channels=3,
-        latent_channels=latent_channels,
-        time_reduction=args.time_reduction,
-        num_embeddings=num_embeddings  # Pass the adjusted parameter
-    ).to(device)
-    
     try:
-        checkpoint = torch.load(args.model_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.eval()
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return None, None, None
-    
-    compressed_frames = []
-    latent_sizes = []
-    
-    # Process frames in batches of time_steps
-    for i in tqdm(range(0, len(frames), args.time_steps)):
-        # Get sequence
-        sequence = frames[i:i+args.time_steps]
-        if len(sequence) < args.time_steps:
-            # Pad the sequence if necessary
-            sequence = sequence + [sequence[-1]] * (args.time_steps - len(sequence))
+        # Flag to determine whether to use different num_embeddings values
+        FLAG_USE_QP_LEVELS = True
         
-        # Create tensor [B, C, T, H, W]
-        sequence_tensor = torch.zeros((1, 3, len(sequence), sequence[0].shape[0], sequence[0].shape[1]), 
-                                      device=device)
-        
-        for t, frame in enumerate(sequence):
-            # Convert BGR to RGB and normalize to [0, 1]
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_tensor = torch.from_numpy(frame_rgb).float().permute(2, 0, 1) / 255.0
-            sequence_tensor[0, :, t, :, :] = frame_tensor.to(device)
-        
-        # Compress and reconstruct
-        with torch.no_grad():
-            reconstructed, latent, _ = model(sequence_tensor)
-            
-            # Get compressed size in bytes
-            latent_cpu = latent.cpu().numpy()
-            latent_sizes.append(latent_cpu.nbytes)
-        
-        # Convert back to numpy
-        reconstructed_np = reconstructed.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()
-        
-        # Convert from RGB back to BGR for OpenCV
-        reconstructed_frames = []
-        for t in range(reconstructed_np.shape[0]):
-            # Convert normalized RGB [0,1] to BGR [0,255]
-            frame_rgb = (reconstructed_np[t] * 255).astype(np.uint8)
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-            reconstructed_frames.append(frame_bgr)
-        
-        # Store actual frames
-        if i + args.time_steps > len(frames):
-            compressed_frames.extend(reconstructed_frames[:len(frames)-i])
+        # Adjust quantization parameters based on QP level
+        if FLAG_USE_QP_LEVELS and qp_level is not None:
+            if qp_level == 1:
+                latent_channels = 8  # Default setting
+                num_embeddings = 512
+            elif qp_level == 2:
+                latent_channels = 8
+                num_embeddings = 256  # Fewer codebook entries = more compression
+            elif qp_level == 3:
+                latent_channels = 8
+                num_embeddings = 128  # Even fewer entries = even more compression
+            else:
+                latent_channels = args.latent_channels
+                num_embeddings = 512  # Default
         else:
-            compressed_frames.extend(reconstructed_frames)
-    
-    compression_time = time.time() - start_time
-    
-    # Calculate total compressed size
-    total_compressed_size = sum(latent_sizes)
-    
-    return compressed_frames, total_compressed_size, compression_time
+            # Default values for all cases if flag is off
+            latent_channels = args.latent_channels
+            num_embeddings = 512
+        
+        # Load model
+        print(f"Loading model from {args.model_path}")
+        model = ImprovedAutoencoder(
+            input_channels=3,
+            latent_channels=latent_channels,
+            time_reduction=args.time_reduction,
+            num_embeddings=num_embeddings
+        ).to(device)
+        
+        try:
+            # Suppress excessive output during model loading
+            original_stdout = sys.stdout
+            sys.stdout = open(os.devnull, 'w')
+            
+            checkpoint = torch.load(args.model_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # Restore stdout
+            sys.stdout = original_stdout
+            
+            print("Model loaded successfully")
+            model.eval()
+            
+        except Exception as e:
+            sys.stdout = original_stdout  # Ensure stdout is restored
+            print(f"Error loading model: {e}")
+            return None, None, None
+        
+        print(f"Processing {len(frames)} frames in batches of {args.time_steps}...")
+        compressed_frames = []
+        latent_sizes = []
+        
+        # Process frames in batches of time_steps
+        for i in tqdm(range(0, len(frames), args.time_steps)):
+            # Get sequence
+            sequence = frames[i:i+args.time_steps]
+            if len(sequence) < args.time_steps:
+                # Pad the sequence if necessary
+                sequence = sequence + [sequence[-1]] * (args.time_steps - len(sequence))
+            
+            try:
+                # Create tensor [B, C, T, H, W]
+                sequence_tensor = torch.zeros((1, 3, len(sequence), sequence[0].shape[0], sequence[0].shape[1]), 
+                                          device=device)
+                
+                for t, frame in enumerate(sequence):
+                    # Convert BGR to RGB and normalize to [0, 1]
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frame_tensor = torch.from_numpy(frame_rgb).float().permute(2, 0, 1) / 255.0
+                    sequence_tensor[0, :, t, :, :] = frame_tensor.to(device)
+                
+                # Compress and reconstruct
+                with torch.no_grad():
+                    reconstructed, latent, _ = model(sequence_tensor)
+                    
+                    # Get compressed size in bytes
+                    latent_cpu = latent.cpu().numpy()
+                    latent_sizes.append(latent_cpu.nbytes)
+                
+                # Convert back to numpy
+                reconstructed_np = reconstructed.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()
+                
+                # Convert from RGB back to BGR for OpenCV
+                reconstructed_frames = []
+                for t in range(reconstructed_np.shape[0]):
+                    # Convert normalized RGB [0,1] to BGR [0,255]
+                    frame_rgb = (reconstructed_np[t] * 255).astype(np.uint8)
+                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                    reconstructed_frames.append(frame_bgr)
+                
+                # Store actual frames
+                if i + args.time_steps > len(frames):
+                    compressed_frames.extend(reconstructed_frames[:len(frames)-i])
+                else:
+                    compressed_frames.extend(reconstructed_frames)
+                    
+            except Exception as e:
+                print(f"Error processing batch starting at frame {i}: {e}")
+                return None, None, None
+        
+        compression_time = time.time() - start_time
+        print(f"Compression completed in {compression_time:.2f} seconds")
+        
+        # Calculate total compressed size
+        total_compressed_size = sum(latent_sizes)
+        print(f"Total compressed size: {total_compressed_size/1024/1024:.2f} MB")
+        
+        return compressed_frames, total_compressed_size, compression_time
+        
+    except Exception as e:
+        print(f"Error in compression process: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None
 
 def compress_with_ffmpeg(frames, codec, crf, output_dir, temp_name="temp", x265_preset="medium"):
     """Compress frames using FFmpeg with the specified codec and CRF."""
@@ -336,82 +363,53 @@ def save_comparison_video(original_frames, compressed_frames_dict, output_path, 
 
 def create_comparison_plots(results, output_dir):
     """Create comparison plots for different compression methods."""
+    # Check if we have any results
+    if not results:
+        print("Warning: No results to plot")
+        return
+    
     # Extract data for plotting
     methods = list(results.keys())
     
-    # Group methods by codec
-    codec_groups = {}
-    our_methods = []
+    # Group methods by type
+    our_methods = [m for m in methods if m.startswith("our_method")]
     
-    for method in methods:
-        if method.startswith("our_method"):
-            our_methods.append(method)
-        else:
-            codec = method.split("_")[0]
-            
-            if codec not in codec_groups:
-                codec_groups[codec] = []
-            codec_groups[codec].append(method)
+    if not our_methods:
+        print("Warning: No compression results found")
+        return
     
     # Set up colors and markers
     colors = {
-        "our": "red",
-        "h264": "blue",
-        "h265": "green",
-        "vp9": "purple"
+        "our": "red"
     }
     
     markers = {
-        "our": "o",
-        "h264": "s",
-        "h265": "^",
-        "vp9": "D"
+        "our": "o"
     }
     
     # Create BPP vs PSNR plot
     plt.figure(figsize=(10, 6))
     
-    # Plot standard codecs
-    for codec, methods_in_group in codec_groups.items():
-        x = [results[m]["bpp"] for m in methods_in_group]
-        y = [results[m]["psnr"] for m in methods_in_group]
-        
-        # Sort by BPP
-        sorted_data = sorted(zip(x, y, methods_in_group), key=lambda item: item[0])
-        x = [item[0] for item in sorted_data]
-        y = [item[1] for item in sorted_data]
-        methods_in_group = [item[2] for item in sorted_data]
-        
-        plt.plot(x, y, color=colors[codec], marker=markers[codec], label=codec.upper())
-        
-        # Annotate CRF values
-        for i, method in enumerate(methods_in_group):
-            crf = method.split("_crf")[1] if "_crf" in method else ""
-            plt.annotate(f"CRF {crf}", (x[i], y[i]), 
-                        textcoords="offset points", xytext=(0, 10), 
-                        ha='center', fontsize=8)
-    
     # Plot our methods
-    if our_methods:
-        x = [results[m]["bpp"] for m in our_methods]
-        y = [results[m]["psnr"] for m in our_methods]
-        
-        # Sort by BPP
-        sorted_data = sorted(zip(x, y, our_methods), key=lambda item: item[0])
-        x = [item[0] for item in sorted_data]
-        y = [item[1] for item in sorted_data]
-        our_methods = [item[2] for item in sorted_data]
-        
-        plt.plot(x, y, color=colors["our"], marker=markers["our"], 
-                linestyle='-', linewidth=2, label="Our Method")
-        
-        # Annotate QP values
-        for i, method in enumerate(our_methods):
-            if "_qp" in method:
-                qp = method.split("_qp")[1]
-                plt.annotate(f"QP {qp}", (x[i], y[i]), 
-                          textcoords="offset points", xytext=(0, 10), 
-                          ha='center', fontsize=8)
+    x = [results[m]["bpp"] for m in our_methods]
+    y = [results[m]["psnr"] for m in our_methods]
+    
+    # Sort by BPP
+    sorted_data = sorted(zip(x, y, our_methods), key=lambda item: item[0])
+    x = [item[0] for item in sorted_data]
+    y = [item[1] for item in sorted_data]
+    our_methods = [item[2] for item in sorted_data]
+    
+    plt.plot(x, y, color=colors["our"], marker=markers["our"], 
+            linestyle='-', linewidth=2, label="Our Method")
+    
+    # Annotate QP values
+    for i, method in enumerate(our_methods):
+        if "_qp" in method:
+            qp = method.split("_qp")[1]
+            plt.annotate(f"QP {qp}", (x[i], y[i]), 
+                      textcoords="offset points", xytext=(0, 10), 
+                      ha='center', fontsize=8)
     
     plt.xlabel('Bits per Pixel (BPP)')
     plt.ylabel('PSNR (dB)')
@@ -419,35 +417,30 @@ def create_comparison_plots(results, output_dir):
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     plt.savefig(os.path.join(output_dir, "rd_curve.png"), dpi=300, bbox_inches='tight')
+    plt.close()
     
     # Create BPP vs MS-SSIM plot
     plt.figure(figsize=(10, 6))
     
-    # Plot standard codecs
-    for codec, methods_in_group in codec_groups.items():
-        x = [results[m]["bpp"] for m in methods_in_group]
-        y = [results[m]["ms_ssim"] for m in methods_in_group]
-        
-        # Sort by BPP
-        sorted_data = sorted(zip(x, y, methods_in_group), key=lambda item: item[0])
-        x = [item[0] for item in sorted_data]
-        y = [item[1] for item in sorted_data]
-        methods_in_group = [item[2] for item in sorted_data]
-        
-        plt.plot(x, y, color=colors[codec], marker=markers[codec], label=codec.upper())
-    
     # Plot our methods
-    if our_methods:
-        x = [results[m]["bpp"] for m in our_methods]
-        y = [results[m]["ms_ssim"] for m in our_methods]
-        
-        # Sort by BPP
-        sorted_data = sorted(zip(x, y, our_methods), key=lambda item: item[0])
-        x = [item[0] for item in sorted_data]
-        y = [item[1] for item in sorted_data]
-        
-        plt.plot(x, y, color=colors["our"], marker=markers["our"], 
-                linestyle='-', linewidth=2, label="Our Method")
+    x = [results[m]["bpp"] for m in our_methods]
+    y = [results[m]["ms_ssim"] for m in our_methods]
+    
+    # Sort by BPP
+    sorted_data = sorted(zip(x, y, our_methods), key=lambda item: item[0])
+    x = [item[0] for item in sorted_data]
+    y = [item[1] for item in sorted_data]
+    
+    plt.plot(x, y, color=colors["our"], marker=markers["our"], 
+            linestyle='-', linewidth=2, label="Our Method")
+    
+    # Annotate QP values
+    for i, method in enumerate(our_methods):
+        if "_qp" in method:
+            qp = method.split("_qp")[1]
+            plt.annotate(f"QP {qp}", (x[i], y[i]), 
+                      textcoords="offset points", xytext=(0, 10), 
+                      ha='center', fontsize=8)
     
     plt.xlabel('Bits per Pixel (BPP)')
     plt.ylabel('MS-SSIM')
@@ -455,33 +448,22 @@ def create_comparison_plots(results, output_dir):
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     plt.savefig(os.path.join(output_dir, "bpp_vs_ssim.png"), dpi=300, bbox_inches='tight')
+    plt.close()
     
     # Create Compression Ratio plot
     plt.figure(figsize=(12, 6))
-    
-    # Combine all methods
-    all_methods = []
-    for methods_in_group in codec_groups.values():
-        all_methods.extend(methods_in_group)
-    all_methods.extend(our_methods)
     
     # Get method names and compression ratios
     labels = []
     values = []
     colors_list = []
     
-    for method in all_methods:
-        if method.startswith("our_method"):
-            if "_qp" in method:
-                label = f"Our QP{method.split('_qp')[1]}"
-            else:
-                label = "Our Method"
-            color = colors["our"]
+    for method in our_methods:
+        if "_qp" in method:
+            label = f"Our QP{method.split('_qp')[1]}"
         else:
-            codec = method.split("_")[0]
-            crf = method.split("_crf")[1] if "_crf" in method else ""
-            label = f"{codec.upper()} CRF{crf}"
-            color = colors[codec]
+            label = "Our Method"
+        color = colors["our"]
         
         labels.append(label)
         values.append(results[method]["compression_ratio"])
@@ -500,6 +482,7 @@ def create_comparison_plots(results, output_dir):
     plt.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "compression_ratio.png"), dpi=300, bbox_inches='tight')
+    plt.close()
     
     print(f"Saved comparison plots to {output_dir}")
 

@@ -15,7 +15,7 @@ if [ ! -f "$STNPP_MODEL" ]; then
 fi
 
 # Define video path
-VIDEO_PATH="datasets/MOTChallenge/MOT16/test/MOT16-04/video.mp4"
+VIDEO_PATH="datasets/MOTChallenge/MOT16/test/MOT16-01/video.mp4"
 
 # Check if video exists
 if [ ! -f "$VIDEO_PATH" ]; then
@@ -23,7 +23,7 @@ if [ ! -f "$VIDEO_PATH" ]; then
     echo "Checking for img1 directory..."
     
     # Check if img1 directory exists
-    IMG_DIR="datasets/MOTChallenge/MOT16/test/MOT16-04/img1"
+    IMG_DIR="datasets/MOTChallenge/MOT16/test/MOT16-01/img1"
     if [ ! -d "$IMG_DIR" ]; then
         echo "Error: Neither video file nor img1 directory found"
         exit 1
