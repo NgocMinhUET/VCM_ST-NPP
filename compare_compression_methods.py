@@ -305,17 +305,33 @@ def compress_with_ffmpeg(frames, codec, crf, output_dir, temp_name="temp", x265_
 
 def evaluate_compression(original_frames, compressed_frames, compressed_size):
     """Evaluate compression quality using multiple metrics."""
-    # Calculate file size of original frames (estimated)
-    _, buffer = cv2.imencode('.png', original_frames[0])
-    original_size_per_frame = len(buffer)
-    original_size = original_size_per_frame * len(original_frames)
+    # Calculate file size of original frames
+    total_pixels = 0
+    original_size = 0
+    
+    for frame in original_frames:
+        h, w = frame.shape[:2]
+        total_pixels += h * w
+        # Calculate size in bytes (3 channels, 8 bits per channel)
+        original_size += h * w * 3
+    
+    # Convert original_size from bytes to bits
+    original_size_bits = original_size * 8
+    compressed_size_bits = compressed_size * 8
     
     # Calculate compression ratio
     compression_ratio = original_size / compressed_size if compressed_size > 0 else float('inf')
     
-    # Calculate bits per pixel
-    total_pixels = original_frames[0].shape[0] * original_frames[0].shape[1] * len(original_frames)
-    bpp = (compressed_size * 8) / total_pixels
+    # Calculate bits per pixel (BPP)
+    # BPP = total compressed bits / total pixels
+    bpp = compressed_size_bits / total_pixels if total_pixels > 0 else 0
+    
+    print(f"\nCompression Statistics:")
+    print(f"Original size: {original_size/1024/1024:.2f} MB")
+    print(f"Compressed size: {compressed_size/1024/1024:.2f} MB")
+    print(f"Total pixels: {total_pixels:,}")
+    print(f"BPP: {bpp:.4f}")
+    print(f"Compression ratio: {compression_ratio:.2f}:1")
     
     # Calculate PSNR and MS-SSIM
     psnr_values = []
@@ -331,6 +347,9 @@ def evaluate_compression(original_frames, compressed_frames, compressed_size):
     
     avg_psnr = sum(psnr_values) / len(psnr_values) if psnr_values else 0
     avg_ssim = sum(ssim_values) / len(ssim_values) if ssim_values else 0
+    
+    print(f"Average PSNR: {avg_psnr:.2f} dB")
+    print(f"Average MS-SSIM: {avg_ssim:.4f}")
     
     return {
         "original_size": original_size,
@@ -696,8 +715,13 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
+    # Check for FFmpeg and codecs
+    print("Checking FFmpeg and codecs...")
+    check_ffmpeg()
+    check_encoder_packages()
+    
     # Load video frames
-    print("Loading video frames...")
+    print("\nLoading video frames...")
     cap = cv2.VideoCapture(args.input_video)
     frames = []
     while True:
@@ -745,16 +769,52 @@ def main():
         sample_indices = [len(frames)//4, len(frames)//2, 3*len(frames)//4]
         for idx in sample_indices:
             comparison = np.hstack([frames[idx], compressed_frames[idx]])
-            cv2.imwrite(os.path.join(args.output_dir, f"comparison_qp{qp}_frame{idx}.png"), comparison)
+            cv2.imwrite(os.path.join(args.output_dir, f"comparison_{method_name}_frame{idx}.png"), comparison)
+    
+    # Test standard codecs
+    codecs = {
+        "h264": [18, 23, 28, 33],  # CRF values for H.264
+        "h265": [18, 23, 28, 33],  # CRF values for H.265
+        "vp9": [18, 23, 28, 33]    # CRF values for VP9
+    }
+    
+    for codec, crf_values in codecs.items():
+        print(f"\nTesting {codec.upper()} codec...")
+        for crf in crf_values:
+            method_name = f"{codec}_crf{crf}"
+            print(f"\nTesting {method_name}...")
+            
+            # Compress frames
+            compressed_frames, compressed_size, compression_time = compress_with_ffmpeg(
+                frames, codec, crf, args.output_dir
+            )
+            
+            if compressed_frames is None:
+                print(f"Compression failed for {method_name}")
+                continue
+            
+            # Evaluate compression
+            eval_results = evaluate_compression(frames, compressed_frames, compressed_size)
+            eval_results["compression_time"] = compression_time
+            results[method_name] = eval_results
+            
+            # Save some sample frames for visual comparison
+            for idx in sample_indices:
+                comparison = np.hstack([frames[idx], compressed_frames[idx]])
+                cv2.imwrite(os.path.join(args.output_dir, f"comparison_{method_name}_frame{idx}.png"), comparison)
     
     # Save the results
-    with open(os.path.join(args.output_dir, "compression_results.json"), 'w') as f:
+    results_file = os.path.join(args.output_dir, "compression_results.json")
+    print(f"\nSaving results to {results_file}")
+    with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
     
     # Create comparison plots
+    print("\nCreating comparison plots...")
     create_comparison_plots(results, args.output_dir)
     
     # Generate textual comparison table
+    print("\nGenerating comparison table...")
     generate_summary_table(results, args.output_dir)
     
     print(f"\nResults saved to {args.output_dir}")
