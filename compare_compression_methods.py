@@ -173,7 +173,7 @@ def compress_with_our_method(frames, args, device, qp_level=None):
         
         print(f"Processing {len(frames)} frames in batches of {args.time_steps}...")
         compressed_frames = []
-        latent_sizes = []
+        total_compressed_size = 0
         
         # Process frames in batches of time_steps
         with tqdm(total=len(frames), desc="Compressing frames") as pbar:
@@ -187,7 +187,7 @@ def compress_with_our_method(frames, args, device, qp_level=None):
                     
                     # Create tensor [B, C, T, H, W]
                     sequence_tensor = torch.zeros((1, 3, len(sequence), sequence[0].shape[0], sequence[0].shape[1]), 
-                                              device=device)
+                                               device=device)
                     
                     for t, frame in enumerate(sequence):
                         # Convert BGR to RGB and normalize to [0, 1]
@@ -197,11 +197,18 @@ def compress_with_our_method(frames, args, device, qp_level=None):
                     
                     # Compress and reconstruct
                     with torch.no_grad():
-                        reconstructed, latent, _ = model(sequence_tensor)
+                        reconstructed, latent, indices = model(sequence_tensor)
                         
-                        # Get compressed size in bytes
-                        latent_cpu = latent.cpu().numpy()
-                        latent_sizes.append(latent_cpu.nbytes)
+                        # Calculate compressed size:
+                        # 1. Size of indices (each index is stored as a 16-bit integer)
+                        indices_size = indices.numel() * 2  # 2 bytes per index
+                        
+                        # 2. Size of codebook (each entry is a float32)
+                        codebook_size = num_embeddings * latent_channels * 4  # 4 bytes per float
+                        
+                        # Total compressed size for this batch
+                        batch_compressed_size = indices_size + codebook_size
+                        total_compressed_size += batch_compressed_size
                     
                     # Convert back to numpy
                     reconstructed_np = reconstructed.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()
@@ -222,20 +229,17 @@ def compress_with_our_method(frames, args, device, qp_level=None):
                     
                     # Update progress bar
                     pbar.update(min(args.time_steps, len(frames) - i))
-                        
+                    
                 except Exception as e:
                     print(f"\nError processing batch starting at frame {i}: {str(e)}")
                     return None, None, None
         
         compression_time = time.time() - start_time
         print(f"\nCompression completed in {compression_time:.2f} seconds")
-        
-        # Calculate total compressed size
-        total_compressed_size = sum(latent_sizes)
         print(f"Total compressed size: {total_compressed_size/1024/1024:.2f} MB")
         
         return compressed_frames, total_compressed_size, compression_time
-        
+
     except Exception as e:
         print(f"\nError in compression process: {str(e)}")
         import traceback
@@ -303,6 +307,50 @@ def compress_with_ffmpeg(frames, codec, crf, output_dir, temp_name="temp", x265_
     
     return compressed_frames, compressed_size, compression_time
 
+def calculate_mota(original_frames, compressed_frames):
+    """Calculate MOTA (Multiple Object Tracking Accuracy) metric."""
+    try:
+        import motmetrics as mm
+        import numpy as np
+        
+        acc = mm.MOTAccumulator(auto_id=True)
+        
+        for orig_frame, comp_frame in zip(original_frames, compressed_frames):
+            # Convert frames to grayscale
+            orig_gray = cv2.cvtColor(orig_frame, cv2.COLOR_BGR2GRAY)
+            comp_gray = cv2.cvtColor(comp_frame, cv2.COLOR_BGR2GRAY)
+            
+            # Use FAST feature detector
+            fast = cv2.FastFeatureDetector_create()
+            
+            # Detect keypoints
+            kp1 = fast.detect(orig_gray, None)
+            kp2 = fast.detect(comp_gray, None)
+            
+            # Get keypoint coordinates
+            if kp1 and kp2:
+                pts1 = np.float32([kp.pt for kp in kp1])
+                pts2 = np.float32([kp.pt for kp in kp2])
+                
+                # Calculate distances between all pairs of points
+                distances = mm.distances.norm2squared_matrix(pts1, pts2)
+                
+                # Update accumulator
+                acc.update(
+                    [i for i in range(len(pts1))],  # Object IDs in original frame
+                    [i for i in range(len(pts2))],  # Object IDs in compressed frame
+                    distances
+                )
+        
+        # Calculate MOTA
+        mh = mm.metrics.create()
+        summary = mh.compute(acc, metrics=['mota'], name='acc')
+        return summary['mota'].iloc[0]
+        
+    except Exception as e:
+        print(f"Error calculating MOTA: {str(e)}")
+        return 0.0
+
 def evaluate_compression(original_frames, compressed_frames, compressed_size):
     """Evaluate compression quality using multiple metrics."""
     # Calculate file size of original frames
@@ -348,8 +396,12 @@ def evaluate_compression(original_frames, compressed_frames, compressed_size):
     avg_psnr = sum(psnr_values) / len(psnr_values) if psnr_values else 0
     avg_ssim = sum(ssim_values) / len(ssim_values) if ssim_values else 0
     
+    # Calculate MOTA
+    mota = calculate_mota(original_frames, compressed_frames)
+    
     print(f"Average PSNR: {avg_psnr:.2f} dB")
     print(f"Average MS-SSIM: {avg_ssim:.4f}")
+    print(f"MOTA: {mota:.4f}")
     
     return {
         "original_size": original_size,
@@ -357,7 +409,8 @@ def evaluate_compression(original_frames, compressed_frames, compressed_size):
         "compression_ratio": compression_ratio,
         "bpp": bpp,
         "psnr": avg_psnr,
-        "ms_ssim": avg_ssim
+        "ms_ssim": avg_ssim,
+        "mota": mota
     }
 
 def save_comparison_video(original_frames, compressed_frames_dict, output_path, fps=30):
@@ -686,14 +739,14 @@ def generate_summary_table(results, output_dir):
         f.write("=========================\n\n")
         
         # Header
-        f.write(f"{'Method':<15} {'BPP':>10} {'PSNR':>10} {'MS-SSIM':>10} {'Comp.Ratio':>12} {'Time(s)':>10}\n")
-        f.write("-" * 70 + "\n")
+        f.write(f"{'Method':<15} {'BPP':>10} {'PSNR':>10} {'MS-SSIM':>10} {'MOTA':>10} {'Comp.Ratio':>12} {'Time(s)':>10}\n")
+        f.write("-" * 80 + "\n")
         
         # Results for each method
         for method in sorted(results.keys()):
             r = results[method]
             f.write(f"{method:<15} {r['bpp']:>10.4f} {r['psnr']:>10.2f} {r['ms_ssim']:>10.4f} "
-                   f"{r['compression_ratio']:>12.2f} {r['compression_time']:>10.1f}\n")
+                   f"{r['mota']:>10.4f} {r['compression_ratio']:>12.2f} {r['compression_time']:>10.1f}\n")
 
 def main():
     args = parse_args()
