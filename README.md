@@ -1,57 +1,75 @@
-# VCM-STNPP: Task-Aware Video Compression Preprocessing for Machine Vision
+# VCM-STNPP: Spatio-Temporal Neural Preprocessing for Video Coding in Machine Vision Tasks
 
-This project implements a spatio-temporal neural preprocessing framework that improves machine vision task performance (e.g., detection, segmentation, tracking) under standard-compatible video compression (HEVC/VVC). It includes ST-NPP, Quantization Adaptation Layer (QAL), and a differentiable Proxy Codec.
+## 🎯 Goal
+This project aims to improve video compression for downstream machine vision tasks (e.g., detection, segmentation, tracking) using a neural preprocessing module trained end-to-end with task-driven loss, while maintaining compatibility with HEVC/VVC codecs.
 
-## 📦 Structure
+---
+
+## 📁 Project Structure
 ```
 models/
-  - st_npp.py
-  - qal.py
-  - proxy_codec.py
-  - combined_model.py
+  st_npp.py, qal.py, proxy_codec.py, combined_model.py
 utils/
-  - codec_utils.py
-  - video_utils.py
+  data_utils.py, codec_utils.py, model_utils.py, metric_utils.py
 scripts/
-  - run_comprehensive_evaluation.sh
-  - run_comprehensive_evaluation.py
+  run_comprehensive_evaluation.sh, run_comprehensive_evaluation.py
+train.py
+evaluate.py
+requirements.txt
+```
+
+---
+
+## 🚀 Installation
+
+### Create environment:
+```bash
+python -m venv vcm_env
+source vcm_env/bin/activate
+pip install -r requirements.txt
+```
+
+### Prepare dataset:
+Structure:
+```
 data/
-  - [your dataset folders]
+  coco/
+  kitti/
+  motchallenge/
 ```
+Use scripts or instructions in `data/README.md` to download and format datasets.
 
-## 🚀 Getting Started
+---
 
-### 1. Create Conda Environment
+## 🧠 Training
 ```bash
-conda env create -f environment.yml
-conda activate vcm_st_npp
+python train.py --dataset coco --batch_size 4 --lr 1e-4 --epochs 20 --checkpoint_dir checkpoints/
 ```
 
-### 2. Prepare Dataset
-Follow instructions in `data/README.md` to download and structure COCO Video, KITTI, MOTChallenge datasets.
+---
 
-### 3. Train
+## 📈 Evaluation
 ```bash
-python scripts/train.py
+python evaluate.py --dataset coco --task detection --checkpoint checkpoints/stnpp_qal_epoch20.pt
 ```
 
-### 4. Evaluate
-```bash
-python scripts/evaluate.py
-```
+---
 
-### 5. Run End-to-End Evaluation
+## 🔁 Comprehensive Evaluation
 ```bash
 bash scripts/run_comprehensive_evaluation.sh
 ```
 
 ---
 
-## 📊 Output
-- Evaluation metrics (mAP, mIoU, MOTA)
-- BD-Rate comparisons with x264/x265
-- Figures and compressed videos under `results/`
+## 📊 Metrics
+- Detection: mAP (COCO)
+- Segmentation: mIoU (KITTI)
+- Tracking: MOTA, IDF1 (MOTChallenge)
+- Rate-Distortion: BD-Rate (via ffmpeg)
+
+---
 
 ## 📎 Notes
-- FFmpeg must be available and support libx264/libx265
-- Proxy Codec is only used for training; inference uses actual HEVC
+- FFmpeg must support `libx264`, `libx265`.
+- Proxy codec is used during training only; inference uses real codecs.
