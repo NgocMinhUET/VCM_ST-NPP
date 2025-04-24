@@ -20,6 +20,7 @@ from PIL import Image
 import glob
 from tqdm import tqdm
 import shutil
+from torchvision import transforms as F
 
 
 class VideoDataset(Dataset):
@@ -681,143 +682,86 @@ class DummyVideoDataset(Dataset):
         return result
 
 
-def get_transforms(
-    task_type: str,
-    resolution: Tuple[int, int],
-    augment: bool = True
-) -> Callable:
+def get_transforms(task_type: str = 'detection', resolution: Tuple[int, int] = (256, 256), augment: bool = True):
     """
-    Get transforms for different tasks.
+    Get appropriate transforms for the specified task type.
     
     Args:
-        task_type: Task type ('detection', 'segmentation', 'tracking')
-        resolution: Target resolution (H, W)
-        augment: Whether to apply data augmentation
+        task_type: Type of task ('detection', 'segmentation', 'tracking')
+        resolution: Target resolution (H, W), defaults to (256, 256)
+        augment: Whether to apply data augmentation transforms, defaults to True
         
     Returns:
-        Transform callable
+        If augment is True: tuple of (train_transform, val_transform)
+        If augment is False: single transform
+        
+    Raises:
+        ValueError: If an unsupported task type is provided
     """
-    train_transforms = []
-    val_transforms = []
+    # Basic transforms for both training and validation
+    basic_transforms = [
+        transforms.Resize(resolution),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ]
     
-    # Common transforms
-    train_transforms.append(transforms.Resize(resolution))
-    val_transforms.append(transforms.Resize(resolution))
-    
-    # Data augmentation for training
+    # Additional transforms for training with augmentation
+    augmentation_transforms = []
     if augment:
-        if task_type == 'detection' or task_type == 'tracking':
-            train_transforms.extend([
+        if task_type in ['detection', 'tracking', 'segmentation']:
+            augmentation_transforms = [
                 transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
                 transforms.RandomHorizontalFlip(p=0.5),
-            ])
-        elif task_type == 'segmentation':
-            train_transforms.extend([
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                transforms.RandomHorizontalFlip(p=0.5),
-            ])
+            ]
     
-    # Final transforms
-    train_transforms.append(transforms.ToTensor())
-    val_transforms.append(transforms.ToTensor())
+    # Create transform compositions
+    train_transform = transforms.Compose(augmentation_transforms + basic_transforms)
+    val_transform = transforms.Compose(basic_transforms)
     
-    # Normalization
-    train_transforms.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
-    val_transforms.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
-    
-    train_transform = transforms.Compose(train_transforms)
-    val_transform = transforms.Compose(val_transforms)
-    
-    return train_transform, val_transform
+    # Return appropriate transforms based on augment flag
+    if augment:
+        return train_transform, val_transform
+    else:
+        return val_transform
 
 
-def collate_video_detection(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+def collate_fn(batch):
     """
-    Collate function for video detection data.
+    Custom collate function to handle variable-sized labels.
     
     Args:
-        batch: List of dictionaries from dataset
+        batch: List of data samples
         
     Returns:
-        Dictionary with batched tensors
-    """
-    frames = torch.stack([item['frames'] for item in batch])  # [B, T, C, H, W]
-    
-    # Collect all boxes and classes
-    all_boxes = []
-    all_classes = []
-    
-    for item in batch:
-        boxes = item['boxes']  # List of T tensors with shape [N_i, 4]
-        classes = item['classes']  # List of T tensors with shape [N_i]
+        Dictionary with collated data
         
-        all_boxes.append(boxes)
-        all_classes.append(classes)
-    
-    return {
-        'frames': frames,
-        'boxes': all_boxes,
-        'classes': all_classes,
-        'sequences': [item['sequence'] for item in batch],
-        'frame_ids': [item['frame_ids'] for item in batch]
-    }
-
-
-def collate_video_segmentation(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+    Raises:
+        RuntimeError: If there's an error collating the batch
     """
-    Collate function for video segmentation data.
-    
-    Args:
-        batch: List of dictionaries from dataset
+    try:
+        # Extract all keys from the batch
+        batch_dict = {key: [] for key in batch[0].keys()}
         
-    Returns:
-        Dictionary with batched tensors
-    """
-    frames = torch.stack([item['frames'] for item in batch])  # [B, T, C, H, W]
-    masks = torch.stack([item['masks'] for item in batch])  # [B, T, H, W]
-    
-    return {
-        'frames': frames,
-        'masks': masks,
-        'sequences': [item['sequence'] for item in batch],
-        'frame_ids': [item['frame_ids'] for item in batch]
-    }
-
-
-def collate_video_tracking(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-    """
-    Collate function for video tracking data.
-    
-    Args:
-        batch: List of dictionaries from dataset
+        # Group items by key
+        for sample in batch:
+            for key, value in sample.items():
+                batch_dict[key].append(value)
         
-    Returns:
-        Dictionary with batched tensors
-    """
-    frames = torch.stack([item['frames'] for item in batch])  # [B, T, C, H, W]
-    
-    # Collect all boxes, classes, and track IDs
-    all_boxes = []
-    all_classes = []
-    all_track_ids = []
-    
-    for item in batch:
-        boxes = item['boxes']  # List of T tensors with shape [N_i, 4]
-        classes = item['classes']  # List of T tensors with shape [N_i]
-        track_ids = item['track_ids']  # List of T tensors with shape [N_i]
+        # Stack frames
+        batch_dict['frames'] = torch.stack(batch_dict['frames'])
         
-        all_boxes.append(boxes)
-        all_classes.append(classes)
-        all_track_ids.append(track_ids)
-    
-    return {
-        'frames': frames,
-        'boxes': all_boxes,
-        'classes': all_classes,
-        'track_ids': all_track_ids,
-        'sequences': [item['sequence'] for item in batch],
-        'frame_ids': [item['frame_ids'] for item in batch]
-    }
+        # QP values can be stacked or converted to tensor
+        if isinstance(batch_dict['qp'][0], (int, float)):
+            batch_dict['qp'] = torch.tensor(batch_dict['qp'])
+        else:
+            batch_dict['qp'] = torch.stack(batch_dict['qp'])
+        
+        # Labels might be of variable size, so we just keep them as a list
+        # batch_dict['labels'] already contains the list of labels
+        
+        return batch_dict
+    except Exception as e:
+        raise RuntimeError(f"Error collating batch: {str(e)}")
 
 
 def get_video_dataloader(
@@ -877,401 +821,505 @@ def get_video_dataloader(
 
 
 class VideoSequenceDataset(Dataset):
-    """
-    Dataset for loading sequences of video frames with associated task labels.
+    """Dataset for loading video sequences with task labels."""
     
-    Loads images from a directory structure, groups them into sequences,
-    and provides them as batches with associated labels and QP values.
-    """
     def __init__(
         self,
         root_dir: str,
-        seq_length: int = 5,
         task_type: str = 'detection',
-        transform=None,
         split: str = 'train',
-        qp_range: Tuple[int, int] = (0, 50),
-        random_qp: bool = True
+        seq_length: int = 5,
+        transform = None,
+        random_qp: bool = False,
+        qp_range: Tuple[int, int] = (22, 37)
     ):
         """
         Initialize the dataset.
         
         Args:
-            root_dir: Root directory containing the dataset
-            seq_length: Number of frames in each sequence
+            root_dir: Root directory of the dataset
             task_type: Type of task ('detection', 'segmentation', 'tracking')
-            transform: Optional transform to apply to the images
             split: Dataset split ('train', 'val', 'test')
-            qp_range: Range of QP values to use
+            seq_length: Number of frames in each sequence
+            transform: Optional transform to be applied on images
             random_qp: Whether to use random QP values
+            qp_range: Range of QP values if random_qp is True
+        
+        Raises:
+            RuntimeError: If the dataset directory doesn't exist or no valid sequences could be found
         """
-        self.root_dir = root_dir
-        self.seq_length = seq_length
+        self.root = root_dir
         self.task_type = task_type
-        self.transform = transform
         self.split = split
-        self.qp_range = qp_range
+        self.seq_length = seq_length
+        self.transform = transform
         self.random_qp = random_qp
+        self.qp_range = qp_range
         
-        # Find all video sequences
+        print(f"Initializing VideoSequenceDataset for {task_type} task, {split} split")
+        print(f"Looking for data in: {root_dir}")
+        
+        # Find all valid sequences
         self.sequences = self._find_sequences()
+
+    def __len__(self) -> int:
+        """Return the number of sequences in the dataset."""
+        return len(self.sequences)
+    
+    def __getitem__(self, idx: int) -> Dict:
+        """
+        Get a single video sequence with its labels.
         
-        # Print dataset info
-        print(f"Loaded {len(self.sequences)} {split} sequences from {root_dir}")
+        Args:
+            idx: Index of the sequence to retrieve
+            
+        Returns:
+            Dictionary containing:
+                - frames: Tensor of shape [seq_length, C, H, W]
+                - labels: List of labels for each frame
+                - qp: QP value for the sequence
+                - video_name: Name of the video
+                - frame_indices: Indices of frames in the sequence
+                
+        Raises:
+            FileNotFoundError: If an image or label file doesn't exist
+            RuntimeError: If there's an error processing the images or labels
+        """
+        sequence = self.sequences[idx]
         
+        # Load all frames in the sequence
+        frames = []
+        labels = []
+        
+        for frame_path, label_path in zip(sequence['frames'], sequence['labels']):
+            # Load and process the image
+            img = self._load_image(frame_path)
+            frames.append(img)
+            
+            # Load and process the label
+            label = self._load_label(label_path)
+            labels.append(label)
+        
+        # Stack frames into a single tensor
+        frames = torch.stack(frames, dim=0)
+        
+        # Generate QP value
+        if self.random_qp:
+            qp = random.randint(self.qp_range[0], self.qp_range[1])
+        else:
+            qp = 32  # Default QP value
+            
+        return {
+            'frames': frames,
+            'labels': labels,
+            'qp': qp,
+            'video_name': sequence['video_name'],
+            'frame_indices': sequence['frame_indices']
+        }
+
     def _find_sequences(self) -> List[Dict]:
         """
         Find all valid video sequences in the dataset.
         
         Returns:
-            List of dictionaries containing paths and metadata for each sequence
+            List of dictionaries, each containing 'frames' and 'labels' paths for a sequence
+            
+        Raises:
+            RuntimeError: If the dataset root directory doesn't exist or no valid sequences are found
         """
-        # This is a simplified implementation
-        # In a real dataset, this would parse the actual directory structure
+        # Verify the root directory exists
+        if not os.path.exists(self.root):
+            raise RuntimeError(f"Dataset root directory does not exist: {self.root}")
+            
+        # Construct paths for task and split
+        task_dir = os.path.join(self.root, self.task_type)
+        split_dir = os.path.join(task_dir, self.split)
+        
+        if not os.path.exists(split_dir):
+            raise RuntimeError(f"Split directory not found: {split_dir}")
+            
+        # Find all video directories
+        video_dirs = []
+        for item in os.listdir(split_dir):
+            video_path = os.path.join(split_dir, item)
+            if os.path.isdir(video_path):
+                video_dirs.append(video_path)
+                
+        if not video_dirs:
+            # Try alternative directory structures
+            print(f"No video directories found in standard structure {split_dir}")
+            # Check if the split_dir itself contains frames and labels directly
+            frames_dir = os.path.join(split_dir, 'frames')
+            if os.path.exists(frames_dir) and os.path.isdir(frames_dir):
+                print(f"Found frames directory directly under {split_dir}")
+                labels_dir = os.path.join(split_dir, 'labels')
+                masks_dir = os.path.join(split_dir, 'masks')
+                tracks_dir = os.path.join(split_dir, 'tracks')
+                
+                # Use first available labels directory based on task
+                label_dir = None
+                if self.task_type == 'tracking' and os.path.exists(tracks_dir):
+                    label_dir = tracks_dir
+                elif self.task_type == 'segmentation' and os.path.exists(masks_dir):
+                    label_dir = masks_dir
+                elif os.path.exists(labels_dir):
+                    label_dir = labels_dir
+                
+                if label_dir:
+                    # Create sequences directly from frames_dir and label_dir
+                    return self._create_sequences_from_dirs(frames_dir, label_dir, os.path.basename(split_dir))
+            
+            raise RuntimeError(f"No video directories found in {split_dir}")
+            
         sequences = []
         
-        try:
-            # Check if the directory exists
-            if not os.path.exists(self.root_dir):
-                print(f"Warning: Directory {self.root_dir} does not exist. Creating dummy data.")
-                return self._create_dummy_sequences()
-            
-            # Find all video sequences
-            video_dirs = glob.glob(os.path.join(self.root_dir, f"{self.split}", "*"))
-            
-            for video_dir in video_dirs:
-                # Get all frame paths
-                frame_paths = sorted(glob.glob(os.path.join(video_dir, "frames", "*.jpg")))
+        for video_dir in tqdm(video_dirs, desc=f"Loading {self.task_type} {self.split} sequences"):
+            frames_dir = os.path.join(video_dir, 'frames')
+            if not os.path.exists(frames_dir):
+                print(f"Warning: Frames directory not found for {video_dir}, skipping")
+                continue
                 
-                # Get all label paths
+            # Find label path based on task type
+            if self.task_type == 'detection':
+                labels_dir = os.path.join(video_dir, 'labels')
+            elif self.task_type == 'segmentation':
+                labels_dir = os.path.join(video_dir, 'masks')
+            elif self.task_type == 'tracking':
+                labels_dir = os.path.join(video_dir, 'tracks')
+            else:
+                labels_dir = os.path.join(video_dir, 'labels')  # Default
+                
+            if not os.path.exists(labels_dir):
+                print(f"Warning: Labels directory not found for {video_dir}, skipping")
+                continue
+                
+            # Get all frame files and sort them
+            frame_files = [f for f in os.listdir(frames_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
+            frame_files.sort()
+            
+            if not frame_files:
+                print(f"Warning: No frame files found in {frames_dir}, skipping")
+                continue
+                
+            # Get corresponding label files
+            label_files = []
+            for frame_file in frame_files:
+                # Find matching label based on task type
+                frame_stem = os.path.splitext(frame_file)[0]
+                
                 if self.task_type == 'detection':
-                    label_paths = sorted(glob.glob(os.path.join(video_dir, "labels", "*.txt")))
+                    label_file = f"{frame_stem}.txt"
                 elif self.task_type == 'segmentation':
-                    label_paths = sorted(glob.glob(os.path.join(video_dir, "masks", "*.png")))
+                    label_file = f"{frame_stem}.png"
                 elif self.task_type == 'tracking':
-                    label_paths = sorted(glob.glob(os.path.join(video_dir, "tracks", "*.txt")))
+                    label_file = f"{frame_stem}.txt"
                 else:
-                    label_paths = [None] * len(frame_paths)  # No labels
-                
-                # Ensure we have labels for all frames (or None for all frames)
-                if label_paths and len(label_paths) != len(frame_paths):
-                    print(f"Warning: Mismatch between frames and labels in {video_dir}")
-                    # Pad with None if needed
-                    if len(label_paths) < len(frame_paths):
-                        label_paths.extend([None] * (len(frame_paths) - len(label_paths)))
-                    else:
-                        label_paths = label_paths[:len(frame_paths)]
-                        
-                # Create sequences of seq_length frames
-                for i in range(0, len(frame_paths) - self.seq_length + 1, self.seq_length):
-                    seq_frames = frame_paths[i:i+self.seq_length]
-                    seq_labels = label_paths[i:i+self.seq_length] if label_paths else [None] * self.seq_length
+                    label_file = f"{frame_stem}.txt"  # Default
                     
-                    # Add sequence to list
-                    sequences.append({
-                        'frames': seq_frames,
-                        'labels': seq_labels,
-                        'video_id': os.path.basename(video_dir)
-                    })
+                label_path = os.path.join(labels_dir, label_file)
+                
+                # Check if label file exists
+                if not os.path.exists(label_path):
+                    print(f"Warning: Label file {label_path} not found, skipping frame")
+                    continue
+                    
+                label_files.append(label_file)
+                
+            if not label_files:
+                print(f"Warning: No valid label files found for {video_dir}, skipping")
+                continue
+                
+            # Create sequences with seq_length frames
+            for i in range(0, len(frame_files) - self.seq_length + 1):
+                seq_frames = [os.path.join(frames_dir, frame_files[i + j]) for j in range(self.seq_length)]
+                seq_labels = [os.path.join(labels_dir, label_files[i + j]) for j in range(self.seq_length)]
+                
+                sequences.append({
+                    'frames': seq_frames,
+                    'labels': seq_labels,
+                    'video_name': os.path.basename(video_dir),
+                    'frame_indices': list(range(i, i + self.seq_length))
+                })
+        
+        if not sequences:
+            raise RuntimeError(
+                f"No valid sequences found for {self.task_type} dataset in {self.split} split. "
+                f"Please check that the dataset is properly organized."
+            )
             
-            return sequences
-            
-        except Exception as e:
-            print(f"Error finding sequences: {e}")
-            return self._create_dummy_sequences()
-    
-    def _create_dummy_sequences(self) -> List[Dict]:
-        """
-        Create dummy sequences when dataset is not available.
-        
-        Returns:
-            List of dictionaries with dummy data
-        """
-        print("Creating 10 dummy sequences with random data")
-        sequences = []
-        
-        for i in range(10):
-            # Create a dummy sequence
-            sequences.append({
-                'frames': [None] * self.seq_length,  # No actual files
-                'labels': [None] * self.seq_length,
-                'video_id': f"dummy_{i}",
-                'is_dummy': True
-            })
-        
+        print(f"Found {len(sequences)} valid sequences for {self.task_type} {self.split}")
         return sequences
-    
-    def _load_image(self, path: str) -> torch.Tensor:
+        
+    def _create_sequences_from_dirs(self, frames_dir, labels_dir, video_name):
         """
-        Load an image from path and convert to tensor.
+        Create sequences from frames and labels directories directly.
         
         Args:
-            path: Path to image file
+            frames_dir: Directory containing frame images
+            labels_dir: Directory containing label files
+            video_name: Name of the video/sequence
             
         Returns:
-            Image tensor of shape [C, H, W]
+            List of dictionaries, each containing 'frames' and 'labels' paths for a sequence
         """
-        if path is None or not os.path.exists(path):
-            # Create dummy image if path doesn't exist
-            img = torch.rand(3, 256, 256)
-        else:
-            # Load and process real image
-            try:
-                with Image.open(path) as img_pil:
-                    img_pil = img_pil.convert('RGB')
-                    
-                    # Apply transform if provided
-                    if self.transform:
-                        img = self.transform(img_pil)
-                    else:
-                        # Basic transform
-                        img = transforms.Compose([
-                            transforms.Resize((256, 256)),
-                            transforms.ToTensor()
-                        ])(img_pil)
-            except Exception as e:
-                print(f"Error loading image {path}: {e}")
-                img = torch.rand(3, 256, 256)
+        # Get all frame files and sort them
+        frame_files = [f for f in os.listdir(frames_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
+        frame_files.sort()
         
-        return img
-    
-    def _load_label(self, path: str, frame_idx: int) -> Union[torch.Tensor, Dict]:
+        if not frame_files:
+            print(f"Warning: No frame files found in {frames_dir}")
+            return []
+            
+        # Get corresponding label files
+        sequence_frames = []
+        sequence_labels = []
+        
+        for frame_file in frame_files:
+            frame_path = os.path.join(frames_dir, frame_file)
+            
+            # Find matching label based on task type
+            frame_stem = os.path.splitext(frame_file)[0]
+            
+            if self.task_type == 'detection':
+                label_file = f"{frame_stem}.txt"
+            elif self.task_type == 'segmentation':
+                label_file = f"{frame_stem}.png"
+            elif self.task_type == 'tracking':
+                label_file = f"{frame_stem}.txt"
+            else:
+                label_file = f"{frame_stem}.txt"  # Default
+                
+            label_path = os.path.join(labels_dir, label_file)
+            
+            # Check if label file exists
+            if not os.path.exists(label_path):
+                print(f"Warning: Label file {label_path} not found for {frame_file}, skipping")
+                continue
+                
+            sequence_frames.append(frame_path)
+            sequence_labels.append(label_path)
+        
+        # Create sequences with seq_length frames
+        sequences = []
+        for i in range(0, len(sequence_frames) - self.seq_length + 1):
+            seq_frames = sequence_frames[i:i + self.seq_length]
+            seq_labels = sequence_labels[i:i + self.seq_length]
+            
+            sequences.append({
+                'frames': seq_frames,
+                'labels': seq_labels,
+                'video_name': video_name,
+                'frame_indices': list(range(i, i + self.seq_length))
+            })
+        
+        print(f"Created {len(sequences)} sequences from {frames_dir} and {labels_dir}")
+        return sequences
+        
+    def _load_image(self, path: str) -> torch.Tensor:
+        """
+        Load and preprocess an image.
+        
+        Args:
+            path: Path to the image file
+            
+        Returns:
+            Preprocessed image as torch.Tensor
+            
+        Raises:
+            FileNotFoundError: If the image file doesn't exist
+            RuntimeError: If there's an error processing the image
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Image file not found: {path}")
+            
+        try:
+            img = Image.open(path).convert('RGB')
+            
+            # Apply transforms if available
+            if self.transform:
+                img = self.transform(img)
+            else:
+                img = F.to_tensor(img)
+                
+            return img
+        except Exception as e:
+            raise RuntimeError(f"Error loading image {path}: {str(e)}")
+            
+    def _load_label(self, path: str) -> Union[torch.Tensor, Dict]:
         """
         Load a label from path based on task type.
         
         Args:
             path: Path to label file
-            frame_idx: Index of frame in sequence
             
         Returns:
             Label tensor or dictionary depending on task type
-        """
-        if path is None or not os.path.exists(path):
-            # Create dummy label if path doesn't exist
-            if self.task_type == 'detection':
-                # For detection: [class_id, x, y, w, h] format
-                num_objects = random.randint(0, 5)
-                label = torch.zeros(num_objects, 5)
-                for i in range(num_objects):
-                    label[i, 0] = random.randint(0, 79)  # class_id
-                    label[i, 1:] = torch.rand(4)  # normalized bbox
-                return label
-            elif self.task_type == 'segmentation':
-                # For segmentation: segmentation mask
-                return torch.randint(0, 80, (256, 256))
-            elif self.task_type == 'tracking':
-                # For tracking: [track_id, class_id, x, y, w, h] format
-                num_objects = random.randint(0, 5)
-                label = torch.zeros(num_objects, 6)
-                for i in range(num_objects):
-                    label[i, 0] = i  # track_id
-                    label[i, 1] = random.randint(0, 79)  # class_id
-                    label[i, 2:] = torch.rand(4)  # normalized bbox
-                return label
-            else:
-                # Default case
-                return torch.zeros(1)
-        else:
-            # Load and process real label
-            try:
-                if self.task_type == 'detection':
-                    # Parse detection labels in YOLO format
-                    with open(path, 'r') as f:
-                        lines = f.readlines()
-                    
-                    boxes = []
-                    for line in lines:
-                        parts = line.strip().split()
-                        if len(parts) >= 5:
-                            # [class_id, x, y, w, h]
-                            box = [float(p) for p in parts[:5]]
-                            boxes.append(box)
-                    
-                    return torch.tensor(boxes) if boxes else torch.zeros(0, 5)
-                    
-                elif self.task_type == 'segmentation':
-                    # Load segmentation mask
-                    with Image.open(path) as mask_pil:
-                        mask = torch.from_numpy(np.array(mask_pil))
-                        # Resize if needed
-                        if mask.shape[0] != 256 or mask.shape[1] != 256:
-                            mask = transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.NEAREST)(
-                                transforms.ToPILImage()(mask.unsqueeze(0).float())
-                            )
-                            mask = torch.from_numpy(np.array(mask))
-                        return mask
-                        
-                elif self.task_type == 'tracking':
-                    # Parse tracking labels
-                    with open(path, 'r') as f:
-                        lines = f.readlines()
-                    
-                    tracks = []
-                    for line in lines:
-                        parts = line.strip().split()
-                        if len(parts) >= 6:
-                            # [track_id, class_id, x, y, w, h]
-                            track = [float(p) for p in parts[:6]]
-                            tracks.append(track)
-                    
-                    return torch.tensor(tracks) if tracks else torch.zeros(0, 6)
-                    
-                else:
-                    # Default case
-                    return torch.zeros(1)
-                    
-            except Exception as e:
-                print(f"Error loading label {path}: {e}")
-                # Return empty/dummy label
-                if self.task_type == 'detection':
-                    return torch.zeros(0, 5)
-                elif self.task_type == 'segmentation':
-                    return torch.zeros(256, 256)
-                elif self.task_type == 'tracking':
-                    return torch.zeros(0, 6)
-                else:
-                    return torch.zeros(1)
-    
-    def __len__(self) -> int:
-        """
-        Return the number of sequences in the dataset.
-        """
-        return len(self.sequences)
-    
-    def __getitem__(self, idx: int) -> Dict:
-        """
-        Get a data item by index.
-        
-        Args:
-            idx: Index
             
-        Returns:
-            Dictionary containing frames, labels, and metadata
+        Raises:
+            FileNotFoundError: If the label file doesn't exist
+            RuntimeError: If there's an error processing the label
         """
-        sequence = self.sequences[idx]
-        
-        # Load frames
-        frames = []
-        for frame_path in sequence['frames']:
-            if 'is_dummy' in sequence and sequence['is_dummy']:
-                # Generate dummy frame for dummy sequences
-                frame = torch.rand(3, 256, 256)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Label file not found: {path}")
+            
+        try:
+            if self.task_type == 'detection':
+                # Parse detection labels in YOLO format
+                with open(path, 'r') as f:
+                    lines = f.readlines()
+                
+                boxes = []
+                for line in lines:
+                    parts = line.strip().split()
+                    if len(parts) >= 5:
+                        # [class_id, x, y, w, h]
+                        box = [float(p) for p in parts[:5]]
+                        boxes.append(box)
+                
+                return torch.tensor(boxes) if boxes else torch.zeros(0, 5)
+                
+            elif self.task_type == 'segmentation':
+                # Load segmentation mask
+                with Image.open(path) as mask_pil:
+                    mask = torch.from_numpy(np.array(mask_pil))
+                    # Resize if needed
+                    if mask.shape[0] != 256 or mask.shape[1] != 256:
+                        mask = transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.NEAREST)(
+                            transforms.ToPILImage()(mask.unsqueeze(0).float())
+                        )
+                        mask = torch.from_numpy(np.array(mask))
+                    return mask
+                    
+            elif self.task_type == 'tracking':
+                # Parse tracking labels
+                with open(path, 'r') as f:
+                    lines = f.readlines()
+                
+                tracks = []
+                for line in lines:
+                    parts = line.strip().split()
+                    if len(parts) >= 6:
+                        # [track_id, class_id, x, y, w, h]
+                        track = [float(p) for p in parts[:6]]
+                        tracks.append(track)
+                
+                return torch.tensor(tracks) if tracks else torch.zeros(0, 6)
+                
             else:
-                # Load real frame
-                frame = self._load_image(frame_path)
-            frames.append(frame)
-        
-        # Stack frames
-        frames_tensor = torch.stack(frames)  # Shape: [T, C, H, W]
-        
-        # Load labels
-        labels = []
-        for i, label_path in enumerate(sequence['labels']):
-            if 'is_dummy' in sequence and sequence['is_dummy']:
-                # Generate dummy label for dummy sequences
-                label = self._load_label(None, i)
-            else:
-                # Load real label
-                label = self._load_label(label_path, i)
-            labels.append(label)
-        
-        # Generate random QP if needed
-        if self.random_qp:
-            qp = random.randint(self.qp_range[0], self.qp_range[1])
-        else:
-            # Use fixed QP based on sequence index
-            qp = (idx % (self.qp_range[1] - self.qp_range[0] + 1)) + self.qp_range[0]
-        
-        return {
-            'frames': frames_tensor,  # Shape: [T, C, H, W]
-            'labels': labels,  # List of labels, format depends on task
-            'qp': torch.tensor(qp, dtype=torch.long),
-            'video_id': sequence['video_id']
-        }
-
-
-def collate_fn(batch):
-    """
-    Custom collate function for variable-sized labels.
-    
-    Args:
-        batch: List of samples returned by __getitem__
-        
-    Returns:
-        Batched data
-    """
-    # Stack frames
-    frames = torch.stack([item['frames'] for item in batch])  # [B, T, C, H, W]
-    
-    # Collect QPs
-    qps = torch.stack([item['qp'] for item in batch])  # [B]
-    
-    # Collect video IDs
-    video_ids = [item['video_id'] for item in batch]
-    
-    # Handle labels (which can be variable-sized)
-    # We'll keep them as a list of lists for now
-    all_labels = [item['labels'] for item in batch]
-    
-    return {
-        'frames': frames,
-        'labels': all_labels,
-        'qp': qps,
-        'video_id': video_ids
-    }
+                raise ValueError(f"Unsupported task type: {self.task_type}")
+                
+        except Exception as e:
+            raise RuntimeError(f"Error loading label {path}: {str(e)}")
 
 
 def get_dataloader(
-    dataset_name: str,
+    dataset_name: str, 
     batch_size: int,
     task_type: str = 'detection',
     split: str = 'train',
     num_workers: int = 4,
     seq_length: int = 5,
-    random_qp: bool = True,
-    qp_range: Tuple[int, int] = (0, 50),
+    random_qp: bool = False,
+    qp_range: Tuple[int, int] = (22, 37),
     shuffle: bool = True,
-    transform=None
+    transform = None
 ) -> DataLoader:
     """
-    Get a DataLoader for the specified dataset.
+    Create a DataLoader for the specified dataset.
     
     Args:
         dataset_name: Name of the dataset or path to dataset directory
-        batch_size: Batch size
+        batch_size: Batch size for the dataloader
         task_type: Type of task ('detection', 'segmentation', 'tracking')
         split: Dataset split ('train', 'val', 'test')
-        num_workers: Number of workers for data loading
+        num_workers: Number of worker processes for data loading
         seq_length: Number of frames in each sequence
         random_qp: Whether to use random QP values
-        qp_range: Range of QP values to use
-        shuffle: Whether to shuffle the data
-        transform: Optional transform to apply to the images
+        qp_range: Range of QP values if random_qp is True
+        shuffle: Whether to shuffle the dataset
+        transform: Optional transforms to apply to the images
         
     Returns:
-        DataLoader for the dataset
+        DataLoader for the specified dataset
+        
+    Raises:
+        RuntimeError: If the dataset directory doesn't exist or no valid sequences were found
+        ValueError: If an unsupported dataset name or task type is provided
     """
-    # Handle predefined datasets
-    if dataset_name.lower() == 'dummy':
-        # Use a dummy dataset with random data
-        dataset_path = 'dummy'
-    else:
-        # Assume dataset_name is a path to the dataset
-        dataset_path = dataset_name
+    print(f"Creating dataloader for {dataset_name} dataset, {task_type} task, {split} split")
     
-    # Create dataset
-    dataset = VideoSequenceDataset(
-        root_dir=dataset_path,
-        seq_length=seq_length,
-        task_type=task_type,
-        transform=transform,
-        split=split,
-        qp_range=qp_range,
-        random_qp=random_qp
-    )
+    # Apply default transforms if none provided
+    if transform is None:
+        transform = get_transforms(task_type)
     
-    # Create dataloader
-    dataloader = DataLoader(
+    try:
+        # First, check if the expected directory structure exists
+        split_dir = os.path.join(dataset_name, task_type, split)
+        
+        if not os.path.exists(split_dir):
+            print(f"Warning: Split directory not found: {split_dir}")
+            print(f"Generating a dummy dataset at {split_dir}")
+            
+            # Create temporary directory for dummy dataset
+            temp_output_dir = Path(dataset_name)
+            
+            # Generate dummy dataset
+            dummy_generator = DummyDatasetGenerator(
+                output_root=temp_output_dir,
+                seq_length=seq_length,
+                num_sequences=5,
+                frames_per_sequence=30,
+                task_type=task_type,
+                split=split
+            )
+            dummy_generator.generate()
+            
+            print(f"Using dummy {task_type} dataset for {split} split")
+            
+        # Create dataset object
+        dataset = VideoSequenceDataset(
+            root_dir=dataset_name,
+            task_type=task_type,
+            split=split,
+            seq_length=seq_length,
+            transform=transform,
+            random_qp=random_qp,
+            qp_range=qp_range
+        )
+    except RuntimeError as e:
+        print(f"Error creating dataset: {str(e)}")
+        print("Falling back to dummy dataset...")
+        
+        # Create temporary directory for dummy dataset
+        temp_output_dir = Path(dataset_name)
+        
+        # Generate dummy dataset
+        dummy_generator = DummyDatasetGenerator(
+            output_root=temp_output_dir,
+            seq_length=seq_length,
+            num_sequences=5,
+            frames_per_sequence=30,
+            task_type=task_type,
+            split=split
+        )
+        dummy_generator.generate()
+        
+        # Try creating the dataset again with the dummy data
+        try:
+            dataset = VideoSequenceDataset(
+                root_dir=dataset_name,
+                task_type=task_type,
+                split=split,
+                seq_length=seq_length,
+                transform=transform,
+                random_qp=random_qp,
+                qp_range=qp_range
+            )
+        except Exception as e2:
+            raise RuntimeError(f"Failed to create dataset even with dummy data: {str(e2)}")
+    
+    # Create DataLoader with appropriate collate function
+    loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
@@ -1281,7 +1329,8 @@ def get_dataloader(
         drop_last=True
     )
     
-    return dataloader
+    print(f"Created dataloader with {len(dataset)} sequences, batch size {batch_size}")
+    return loader
 
 
 class MOT16DataAdapter:
@@ -1321,14 +1370,33 @@ class MOT16DataAdapter:
         self.output_frames_dir.mkdir(parents=True, exist_ok=True)
         self.output_labels_dir.mkdir(parents=True, exist_ok=True)
         
-        # Find all sequences
+        # Find all sequences - try original expected structure first
         self.sequences = list((self.mot_root / split).glob("MOT16-*"))
         
+        # If no sequences found, try alternative structures
         if not self.sequences:
-            print(f"No MOT16 sequences found in {self.mot_root / split}")
+            print(f"No sequences found in {self.mot_root / split}")
+            
+            # Try finding sequences directly in the root directory
+            direct_sequences = list(self.mot_root.glob("MOT16-*"))
+            if direct_sequences:
+                print(f"Found {len(direct_sequences)} sequences directly in {self.mot_root}")
+                self.sequences = direct_sequences
+            else:
+                # Try find sequences in 'train' and 'test' subdirectories regardless of specified split
+                for alt_split in ['train', 'test']:
+                    alt_sequences = list((self.mot_root / alt_split).glob("MOT16-*"))
+                    if alt_sequences:
+                        print(f"Found {len(alt_sequences)} sequences in alternative split {alt_split}")
+                        self.sequences = alt_sequences
+                        self.split = alt_split  # Update split to match what was found
+                        break
+        
+        if not self.sequences:
+            print(f"No MOT16 sequences found in {self.mot_root} or its subdirectories")
             return
             
-        print(f"Found {len(self.sequences)} MOT16 sequences in {split} split")
+        print(f"Found {len(self.sequences)} MOT16 sequences in {self.split} split")
     
     def convert(self):
         """
@@ -1487,6 +1555,123 @@ class MOT16DataAdapter:
             print("Dataset verification failed")
         
         return success
+
+
+class DummyDatasetGenerator:
+    """
+    Creates a dummy dataset for tracking tasks in the expected directory structure.
+    """
+    def __init__(
+        self,
+        output_root: str,
+        seq_length: int = 5,
+        num_sequences: int = 10,
+        frames_per_sequence: int = 30,
+        image_size: Tuple[int, int] = (256, 256),
+        task_type: str = 'tracking',
+        split: str = 'train'
+    ):
+        """
+        Initialize dummy dataset generator.
+        
+        Args:
+            output_root: Path to output directory
+            seq_length: Number of frames in each sequence
+            num_sequences: Number of sequences to generate
+            frames_per_sequence: Number of frames in each video sequence
+            image_size: Size of generated images (H, W)
+            task_type: Type of task ('detection', 'segmentation', 'tracking')
+            split: Data split ('train', 'val', 'test')
+        """
+        self.output_root = Path(output_root)
+        self.seq_length = seq_length
+        self.num_sequences = num_sequences
+        self.frames_per_sequence = frames_per_sequence
+        self.image_size = image_size
+        self.task_type = task_type
+        self.split = split
+        
+        # Output directories
+        self.task_dir = self.output_root / task_type
+        self.split_dir = self.task_dir / split
+        
+        # Create directory structure
+        self.split_dir.mkdir(parents=True, exist_ok=True)
+    
+    def generate(self):
+        """
+        Generate dummy dataset with the expected directory structure.
+        """
+        print(f"Generating dummy {self.task_type} dataset for {self.split} split...")
+        
+        for seq_idx in range(self.num_sequences):
+            # Create sequence directory
+            seq_name = f"sequence_{seq_idx:02d}"
+            seq_dir = self.split_dir / seq_name
+            frames_dir = seq_dir / "frames"
+            
+            # Determine labels directory based on task type
+            if self.task_type == 'detection':
+                labels_dir = seq_dir / "labels"
+            elif self.task_type == 'segmentation':
+                labels_dir = seq_dir / "masks"
+            elif self.task_type == 'tracking':
+                labels_dir = seq_dir / "tracks"
+            else:
+                labels_dir = seq_dir / "labels"  # Default
+            
+            # Create directories
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            labels_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate frames and labels
+            for frame_idx in range(self.frames_per_sequence):
+                # Generate dummy image (black with frame number)
+                img = np.zeros((self.image_size[0], self.image_size[1], 3), dtype=np.uint8)
+                # Add some color and text to make it visually distinguishable
+                cv2.rectangle(img, (50, 50), (self.image_size[1]-50, self.image_size[0]-50), 
+                              (0, 100, 200), 2)
+                cv2.putText(img, f"Seq {seq_idx:02d}, Frame {frame_idx:03d}", 
+                           (70, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                # Save image
+                img_path = frames_dir / f"frame_{frame_idx:06d}.jpg"
+                cv2.imwrite(str(img_path), img)
+                
+                # Generate dummy labels based on task type
+                label_path = labels_dir / f"frame_{frame_idx:06d}.txt"
+                
+                with open(label_path, 'w') as f:
+                    # Generate random number of objects (1-5)
+                    num_objects = random.randint(1, 5)
+                    
+                    for obj_idx in range(num_objects):
+                        if self.task_type == 'tracking':
+                            # Tracking format: class_id track_id x_center y_center width height
+                            class_id = random.randint(0, 2)  # Random class ID
+                            track_id = obj_idx  # Consistent track ID
+                            x_center = random.uniform(0.2, 0.8)
+                            y_center = random.uniform(0.2, 0.8)
+                            width = random.uniform(0.05, 0.2)
+                            height = random.uniform(0.05, 0.2)
+                            f.write(f"{class_id} {track_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n")
+                        elif self.task_type == 'detection':
+                            # Detection format: class_id x_center y_center width height
+                            class_id = random.randint(0, 2)  # Random class ID
+                            x_center = random.uniform(0.2, 0.8)
+                            y_center = random.uniform(0.2, 0.8)
+                            width = random.uniform(0.05, 0.2)
+                            height = random.uniform(0.05, 0.2)
+                            f.write(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n")
+                        elif self.task_type == 'segmentation':
+                            # For segmentation, just create a dummy text file
+                            # (we would normally create a segmentation mask image)
+                            f.write(f"Dummy segmentation for frame {frame_idx}\n")
+            
+            print(f"Generated sequence {seq_name} with {self.frames_per_sequence} frames")
+        
+        print(f"Generated dummy {self.task_type} dataset with {self.num_sequences} sequences")
+        return self.output_root
 
 
 # Test code

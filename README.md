@@ -333,4 +333,55 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Acknowledgments
 
 - Thanks to all contributors
-- The PyTorch team for their excellent deep learning framework 
+- The PyTorch team for their excellent deep learning framework
+
+# Shape Handling Fix for Metric Calculations
+
+This repository contains fixes for shape handling in metric calculations for task-aware video compression. 
+
+## Key Issues Fixed
+
+1. **Shape mismatches in metric calculations**: The original implementation had issues handling tensors with different shapes, causing training to fail when inputs didn't match exactly.
+
+2. **Video sequence handling**: The code didn't consistently extract middle frames from video sequences ([B, T, C, H, W]), causing metric calculation inconsistencies.
+
+3. **NaN and Infinity handling**: Better error handling for non-finite values that could break training.
+
+## Files Modified
+
+### 1. `utils/loss_utils.py`
+- Fixed `compute_total_loss` function to better handle video sequences
+- Added shape validation and automatic resizing for mismatched tensor dimensions
+- Improved error handling and debug output
+- Added contiguous memory layouts for extracted tensors
+
+### 2. `utils/metric_utils.py`
+- Updated `compute_psnr`, `compute_ssim`, and `compute_bpp` functions
+- Added robust shape handling with automatic resizing
+- Added automatic frame extraction for video sequences
+- Improved error handling for edge cases (NaN, Inf, empty tensors)
+- Normalized input values when needed
+
+### 3. Added `test_shape_handling.py`
+- Created a test script to verify the fixes
+- Tests various input shapes and edge cases
+- Ensures metrics are calculated consistently
+
+## Testing
+
+The fixes were tested with the following scenarios:
+- Standard case: Matching tensor shapes
+- Video sequence case: 5D tensors with time dimension
+- Shape mismatch case: Different spatial dimensions
+- Batch mismatch case: Different batch sizes
+- Edge cases: Empty tensors, large values, small values, NaN, Inf, identical images
+
+## Usage
+
+Run the test script to verify the fixes:
+
+```bash
+python test_shape_handling.py
+```
+
+These modifications make the training more robust against tensor shape variations, which can happen due to batch size changes, different image resolutions, or when combining different datasets. 

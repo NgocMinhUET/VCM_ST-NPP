@@ -7,9 +7,9 @@ This module provides neural network models for various downstream tasks:
 - Object tracking
 """
 
-from models.task_networks.detector import ObjectDetector, VideoObjectDetector
-from models.task_networks.segmenter import SegmentationNet, VideoSegmentationNet, AttentionUNet, DeepLabV3Plus
-from models.task_networks.tracker import ObjectTracker, VideoObjectTracker
+from models.task_networks.detector import ObjectDetector, VideoObjectDetector, DummyDetector
+from models.task_networks.segmenter import SegmentationNet, VideoSegmentationNet, AttentionUNet, DeepLabV3Plus, DummySegmenter
+from models.task_networks.tracker import ObjectTracker, VideoObjectTracker, DummyTracker
 
 # Dictionary mapping task names to their respective model classes
 TASK_MODELS = {
