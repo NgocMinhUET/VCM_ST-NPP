@@ -26,7 +26,7 @@ The system consists of three main components:
 3. **Task Networks**: Pre-trained or fine-tuned models for specific computer vision tasks:
    - **Detection**: Object detection network based on YOLOv8
    - **Segmentation**: Semantic segmentation with UNet-based architecture
-   - **Tracking**: Multi-object tracking with appearance and motion features
+   - **Tracking**: Multi-object tracking with appearance and motion features, evaluated using motmetrics
 
 ## Setup
 
@@ -70,6 +70,16 @@ This error occurs when scikit-learn is not installed. To fix:
 ```bash
 pip install scikit-learn
 ```
+
+### Tracking Evaluation Dependencies
+
+The tracking evaluation uses motmetrics instead of lap (Linear Assignment Problem solver):
+
+```bash
+pip install motmetrics
+```
+
+This change was made to avoid build issues with the lap package. The system uses motmetrics for computing tracking metrics like MOTA, MOTP, and IDF1, with fallback mechanisms if motmetrics is not available.
 
 ### TensorFlow Warnings
 
