@@ -18,6 +18,8 @@ import json
 from torchvision import transforms
 from PIL import Image
 import glob
+from tqdm import tqdm
+import shutil
 
 
 class VideoDataset(Dataset):
@@ -1280,6 +1282,211 @@ def get_dataloader(
     )
     
     return dataloader
+
+
+class MOT16DataAdapter:
+    """
+    Adapter for MOT16 dataset.
+    Converts MOT16 format to the format expected by task-aware video compression model.
+    """
+    def __init__(
+        self,
+        mot_root: str,
+        output_root: str,
+        seq_length: int = 5,
+        split: str = "train",
+        stride: int = 1,
+    ):
+        """
+        Initialize MOT16 dataset adapter.
+        
+        Args:
+            mot_root: Path to MOT16 dataset
+            output_root: Path to output directory
+            seq_length: Number of frames in each sequence
+            split: Data split ('train' or 'test')
+            stride: Stride for frame sampling
+        """
+        self.mot_root = Path(mot_root)
+        self.output_root = Path(output_root)
+        self.seq_length = seq_length
+        self.split = split
+        self.stride = stride
+        
+        # Output directories
+        self.output_frames_dir = self.output_root / "tracking" / split / "frames"
+        self.output_labels_dir = self.output_root / "tracking" / split / "labels"
+        
+        # Create output directories
+        self.output_frames_dir.mkdir(parents=True, exist_ok=True)
+        self.output_labels_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Find all sequences
+        self.sequences = list((self.mot_root / split).glob("MOT16-*"))
+        
+        if not self.sequences:
+            print(f"No MOT16 sequences found in {self.mot_root / split}")
+            return
+            
+        print(f"Found {len(self.sequences)} MOT16 sequences in {split} split")
+    
+    def convert(self):
+        """
+        Convert MOT16 dataset to the expected format.
+        """
+        for seq_path in self.sequences:
+            seq_name = seq_path.name
+            print(f"Processing sequence {seq_name}...")
+            
+            # Create output directories for this sequence
+            seq_frames_dir = self.output_frames_dir / seq_name
+            seq_labels_dir = self.output_labels_dir / seq_name
+            seq_frames_dir.mkdir(exist_ok=True)
+            seq_labels_dir.mkdir(exist_ok=True)
+            
+            # Find all frame images
+            img_dir = seq_path / "img1"
+            frames = sorted(list(img_dir.glob("*.jpg")))
+            
+            if not frames:
+                print(f"No frames found in {img_dir}")
+                continue
+                
+            print(f"Found {len(frames)} frames in {seq_name}")
+            
+            # Parse ground truth
+            gt_file = seq_path / "gt" / "gt.txt"
+            frame_annots = {}
+            
+            if gt_file.exists():
+                with open(gt_file, 'r') as f:
+                    for line in f:
+                        parts = line.strip().split(',')
+                        if len(parts) < 7:
+                            continue
+                        
+                        frame_id = int(parts[0])
+                        track_id = int(parts[1])
+                        x = float(parts[2])
+                        y = float(parts[3])
+                        w = float(parts[4])
+                        h = float(parts[5])
+                        conf = float(parts[6])
+                        class_id = int(parts[7]) if len(parts) > 7 else 0  # Default class ID
+                        
+                        # Skip if confidence is 0
+                        if conf == 0:
+                            continue
+                        
+                        if frame_id not in frame_annots:
+                            frame_annots[frame_id] = []
+                        
+                        # Convert to YOLO format: class_id, track_id, x_center, y_center, width, height
+                        # in normalized coordinates
+                        frame_annots[frame_id].append([class_id, track_id, x, y, w, h])
+            else:
+                print(f"No ground truth file found at {gt_file}")
+            
+            # Process frame sequences
+            for i in range(0, len(frames) - self.seq_length * self.stride + 1, self.stride):
+                seq_id = i // self.stride
+                
+                # Extract sequence frames
+                seq_frames = frames[i:i + self.seq_length * self.stride:self.stride]
+                
+                if len(seq_frames) < self.seq_length:
+                    continue
+                
+                # Get frame IDs from filenames
+                frame_ids = [int(f.stem) for f in seq_frames]
+                
+                # Copy frames to output directory
+                for idx, (frame_path, frame_id) in enumerate(zip(seq_frames, frame_ids)):
+                    dst_path = seq_frames_dir / f"{seq_id:06d}_{idx:02d}.jpg"
+                    try:
+                        shutil.copy(frame_path, dst_path)
+                    except Exception as e:
+                        print(f"Error copying frame {frame_path} to {dst_path}: {e}")
+                
+                # Create annotation files in YOLO format for tracking
+                for idx, frame_id in enumerate(frame_ids):
+                    label_path = seq_labels_dir / f"{seq_id:06d}_{idx:02d}.txt"
+                    
+                    if frame_id in frame_annots:
+                        # Get image dimensions for normalization
+                        img = Image.open(seq_frames[idx])
+                        img_width, img_height = img.size
+                        
+                        with open(label_path, 'w') as f:
+                            for annot in frame_annots[frame_id]:
+                                class_id, track_id, x, y, w, h = annot
+                                
+                                # Convert to normalized coordinates
+                                x_center = (x + w/2) / img_width
+                                y_center = (y + h/2) / img_height
+                                norm_w = w / img_width
+                                norm_h = h / img_height
+                                
+                                # Write in YOLO format with track_id
+                                f.write(f"{class_id} {track_id} {x_center} {y_center} {norm_w} {norm_h}\n")
+                    else:
+                        # Create empty label file if no annotations
+                        with open(label_path, 'w') as f:
+                            pass
+            
+            print(f"Processed sequence {seq_name}")
+        
+        print("Conversion completed successfully")
+    
+    def verify(self):
+        """
+        Verify the converted dataset.
+        """
+        # Check that the expected directories and files exist
+        tracking_dir = self.output_root / "tracking" / self.split
+        frames_dir = tracking_dir / "frames"
+        labels_dir = tracking_dir / "labels"
+        
+        if not frames_dir.exists() or not labels_dir.exists():
+            print(f"Error: Missing directories {frames_dir} or {labels_dir}")
+            return False
+        
+        sequences = [d for d in frames_dir.iterdir() if d.is_dir()]
+        
+        if not sequences:
+            print(f"Error: No sequences found in {frames_dir}")
+            return False
+        
+        success = True
+        for seq_dir in sequences:
+            seq_name = seq_dir.name
+            
+            # Check for corresponding label directory
+            label_dir = labels_dir / seq_name
+            if not label_dir.exists():
+                print(f"Error: Missing label directory for sequence {seq_name}")
+                success = False
+                continue
+            
+            # Count frames and labels
+            frame_files = list(seq_dir.glob("*.jpg"))
+            label_files = list(label_dir.glob("*.txt"))
+            
+            if len(frame_files) != len(label_files):
+                print(f"Warning: Mismatch in sequence {seq_name}: {len(frame_files)} frames, {len(label_files)} labels")
+            
+            if not frame_files:
+                print(f"Error: No frames found in sequence {seq_name}")
+                success = False
+            
+            print(f"Sequence {seq_name}: {len(frame_files)} frames, {len(label_files)} labels")
+        
+        if success:
+            print("Dataset verification passed")
+        else:
+            print("Dataset verification failed")
+        
+        return success
 
 
 # Test code

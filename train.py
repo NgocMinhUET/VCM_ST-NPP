@@ -329,92 +329,151 @@ def validate(model, dataloader, criterion, device, epoch, writer):
     
     # Counter for number of batches
     num_batches = 0
+    successful_batches = 0
+    error_batches = 0
     
     # Create progress bar
     pbar = tqdm(total=len(dataloader), desc=f"Validation {epoch+1}")
+    start_time = time.time()
     
     with torch.no_grad():
         try:
             for batch_idx, batch in enumerate(dataloader):
-                # Extract data from batch
-                frames = batch['frames'].to(device)
-                labels = batch['labels']
-                qp = batch['qp'].to(device)
-                
                 try:
+                    # Extract data from batch
+                    frames = batch['frames'].to(device)
+                    labels = batch['labels']
+                    qp = batch['qp'].to(device)
+                    
+                    # Print shape information for the first batch
+                    if batch_idx == 0:
+                        print(f"Validation input shape: {frames.shape}, Device: {frames.device}")
+                        print(f"Validation QP shape: {qp.shape}, Device: {qp.device}")
+                        print(f"Validation labels type: {type(labels)}, Length: {len(labels)}")
+                    
                     # Forward pass
-                    output = model(frames, qp)
+                    try:
+                        output = model(frames, qp)
+                        
+                        # Get output components
+                        reconstructed = output['reconstructed']
+                        task_output = output['task_output']
+                        bitrate = output['bitrate']
+                        
+                        # Convert labels to appropriate format based on task type
+                        if args.task_type == 'detection':
+                            # Process detection labels
+                            task_labels = torch.zeros_like(task_output)
+                            # This is simplified
+                        
+                        elif args.task_type == 'segmentation':
+                            # Process segmentation labels
+                            task_labels = torch.zeros_like(task_output)
+                            # This is simplified
+                        
+                        elif args.task_type == 'tracking':
+                            # Process tracking labels
+                            task_labels = torch.zeros_like(task_output)
+                            # This is simplified
+                        
+                        # Compute loss
+                        try:
+                            loss = compute_total_loss(
+                                task_out=task_output,
+                                labels=task_labels,
+                                recon=reconstructed,
+                                raw=frames,
+                                bitrate=bitrate,
+                                task_weight=args.task_weight,
+                                recon_weight=args.recon_weight,
+                                bitrate_weight=args.bitrate_weight
+                            )
+                        except Exception as e:
+                            print(f"Error computing validation loss for batch {batch_idx}: {str(e)}")
+                            loss = torch.tensor(float('nan'), device=device)
+                        
+                        # Calculate metrics
+                        try:
+                            psnr = compute_psnr(frames, reconstructed)
+                            ssim = compute_ssim(frames, reconstructed)
+                            bpp = compute_bpp(bitrate.mean().item(), frames.size(3), frames.size(4), frames.size(2))
+                            
+                            # Ensure metrics are valid numbers
+                            if torch.isnan(psnr).any() or torch.isinf(psnr).any():
+                                print(f"Warning: Invalid PSNR values in batch {batch_idx}")
+                                psnr = torch.tensor(0.0, device=device)
+                            
+                            if torch.isnan(ssim).any() or torch.isinf(ssim).any():
+                                print(f"Warning: Invalid SSIM values in batch {batch_idx}")
+                                ssim = torch.tensor(0.0, device=device)
+                                
+                            if np.isnan(bpp) or np.isinf(bpp):
+                                print(f"Warning: Invalid BPP value in batch {batch_idx}")
+                                bpp = 0.0
+                        except Exception as e:
+                            print(f"Error computing metrics for batch {batch_idx}: {str(e)}")
+                            psnr = torch.tensor(0.0, device=device)
+                            ssim = torch.tensor(0.0, device=device)
+                            bpp = 0.0
+                        
+                        # Calculate task-specific metrics
+                        try:
+                            if args.task_type == 'detection':
+                                batch_task_metrics = evaluate_detection(task_output, task_labels)
+                            elif args.task_type == 'segmentation':
+                                batch_task_metrics = evaluate_segmentation(task_output, task_labels)
+                            elif args.task_type == 'tracking':
+                                batch_task_metrics = evaluate_tracking(task_output, task_labels)
+                            else:
+                                batch_task_metrics = {}
+                                
+                            # Update task metrics
+                            for k, v in batch_task_metrics.items():
+                                if k not in task_metrics:
+                                    task_metrics[k] = 0.0
+                                # Ensure metric value is valid
+                                if not (np.isnan(v) or np.isinf(v)):
+                                    task_metrics[k] += v
+                                else:
+                                    print(f"Warning: Invalid {k} value in batch {batch_idx}")
+                        except Exception as e:
+                            print(f"Error computing task metrics for batch {batch_idx}: {str(e)}")
+                            batch_task_metrics = {}
+                        
+                        # Accumulate metrics (only if loss is valid)
+                        if not torch.isnan(loss).any() and not torch.isinf(loss).any():
+                            total_loss += loss.item()
+                            total_psnr += psnr.item() if isinstance(psnr, torch.Tensor) else psnr
+                            total_ssim += ssim.item() if isinstance(ssim, torch.Tensor) else ssim
+                            total_bpp += bpp
+                            successful_batches += 1
+                        
+                        num_batches += 1
+                        
+                        # Update progress bar
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            'loss': f"{loss.item():.4f}" if not torch.isnan(loss).any() and not torch.isinf(loss).any() else "N/A",
+                            'psnr': f"{psnr.item() if isinstance(psnr, torch.Tensor) else psnr:.2f}",
+                            'success': f"{successful_batches}/{num_batches}"
+                        })
                     
-                    # Get output components
-                    reconstructed = output['reconstructed']
-                    task_output = output['task_output']
-                    bitrate = output['bitrate']
-                    
-                    # Convert labels to appropriate format based on task type
-                    if args.task_type == 'detection':
-                        # Process detection labels
-                        task_labels = torch.zeros_like(task_output)
-                        # This is simplified
-                    
-                    elif args.task_type == 'segmentation':
-                        # Process segmentation labels
-                        task_labels = torch.zeros_like(task_output)
-                        # This is simplified
-                    
-                    elif args.task_type == 'tracking':
-                        # Process tracking labels
-                        task_labels = torch.zeros_like(task_output)
-                        # This is simplified
-                    
-                    # Compute loss
-                    loss = compute_total_loss(
-                        task_out=task_output,
-                        labels=task_labels,
-                        recon=reconstructed,
-                        raw=frames,
-                        bitrate=bitrate,
-                        task_weight=args.task_weight,
-                        recon_weight=args.recon_weight,
-                        bitrate_weight=args.bitrate_weight
-                    )
-                    
-                    # Calculate metrics
-                    psnr = compute_psnr(frames, reconstructed)
-                    ssim = compute_ssim(frames, reconstructed)
-                    bpp = compute_bpp(bitrate.mean().item(), frames.size(3), frames.size(4), frames.size(2))
-                    
-                    # Calculate task-specific metrics
-                    if args.task_type == 'detection':
-                        batch_task_metrics = evaluate_detection(task_output, task_labels)
-                    elif args.task_type == 'segmentation':
-                        batch_task_metrics = evaluate_segmentation(task_output, task_labels)
-                    elif args.task_type == 'tracking':
-                        batch_task_metrics = evaluate_tracking(task_output, task_labels)
-                    
-                    # Update task metrics
-                    for k, v in batch_task_metrics.items():
-                        if k not in task_metrics:
-                            task_metrics[k] = 0.0
-                        task_metrics[k] += v
-                    
-                    # Accumulate metrics
-                    total_loss += loss.item()
-                    total_psnr += psnr.item() if isinstance(psnr, torch.Tensor) else psnr
-                    total_ssim += ssim.item() if isinstance(ssim, torch.Tensor) else ssim
-                    total_bpp += bpp
-                    num_batches += 1
-                    
-                    # Update progress bar
-                    pbar.update(1)
-                    pbar.set_postfix({
-                        'loss': f"{loss.item():.4f}",
-                        'psnr': f"{psnr.item() if isinstance(psnr, torch.Tensor) else psnr:.2f}"
-                    })
-                
+                    except RuntimeError as e:
+                        if 'out of memory' in str(e):
+                            print(f"CUDA OOM in validation batch {batch_idx}. Skipping...")
+                            torch.cuda.empty_cache()
+                        else:
+                            print(f"Runtime error in validation batch {batch_idx}: {str(e)}")
+                        error_batches += 1
+                        pbar.update(1)
+                        continue
+                        
                 except Exception as e:
-                    print(f"Error in validation batch {batch_idx}: {str(e)}")
+                    print(f"Error processing validation batch {batch_idx}: {str(e)}")
+                    error_batches += 1
+                    pbar.update(1)
                     continue
-            
+                
         except Exception as e:
             print(f"Error during validation: {str(e)}")
         
@@ -422,25 +481,29 @@ def validate(model, dataloader, criterion, device, epoch, writer):
             pbar.close()
     
     # Calculate averages
-    avg_loss = total_loss / max(num_batches, 1)
-    avg_psnr = total_psnr / max(num_batches, 1)
-    avg_ssim = total_ssim / max(num_batches, 1)
-    avg_bpp = total_bpp / max(num_batches, 1)
+    elapsed_time = time.time() - start_time
+    avg_loss = total_loss / max(successful_batches, 1)
+    avg_psnr = total_psnr / max(successful_batches, 1)
+    avg_ssim = total_ssim / max(successful_batches, 1)
+    avg_bpp = total_bpp / max(successful_batches, 1)
     
     # Average task metrics
-    avg_task_metrics = {k: v / max(num_batches, 1) for k, v in task_metrics.items()}
+    avg_task_metrics = {k: v / max(successful_batches, 1) for k, v in task_metrics.items()}
     
     # Log metrics
     writer.add_scalar('Val/Loss', avg_loss, epoch)
     writer.add_scalar('Val/PSNR', avg_psnr, epoch)
     writer.add_scalar('Val/SSIM', avg_ssim, epoch)
     writer.add_scalar('Val/BPP', avg_bpp, epoch)
+    writer.add_scalar('Val/ErrorRate', error_batches / max(num_batches, 1), epoch)
     
     # Log task-specific metrics
     for k, v in avg_task_metrics.items():
         writer.add_scalar(f'Val/{k}', v, epoch)
     
-    print(f"Validation Epoch {epoch+1}: Loss={avg_loss:.4f}, PSNR={avg_psnr:.2f}dB, SSIM={avg_ssim:.4f}, BPP={avg_bpp:.4f}")
+    # Print validation results
+    print(f"\nValidation Epoch {epoch+1} completed in {elapsed_time:.2f}s - Processed {num_batches} batches ({successful_batches} successful, {error_batches} errors)")
+    print(f"Metrics: Loss={avg_loss:.4f}, PSNR={avg_psnr:.2f}dB, SSIM={avg_ssim:.4f}, BPP={avg_bpp:.4f}")
     
     # Print task-specific metrics
     if args.task_type == 'detection':
@@ -455,6 +518,7 @@ def validate(model, dataloader, criterion, device, epoch, writer):
         'psnr': avg_psnr,
         'ssim': avg_ssim,
         'bpp': avg_bpp,
+        'error_rate': error_batches / max(num_batches, 1),
         **avg_task_metrics
     }
 
