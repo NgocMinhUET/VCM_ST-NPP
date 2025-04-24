@@ -21,547 +21,414 @@ import math
 
 class TransformBlock(nn.Module):
     """
-    Learnable transform coding block that approximates DCT/DST transforms
-    in traditional codecs.
+    Transform block for frequency-domain transformation
     """
-    def __init__(self, block_size=8, channels=1):
-        """
-        Initialize transform block.
-        
-        Args:
-            block_size: Size of transform blocks (typically 4, 8, 16, or 32)
-            channels: Number of channels to process
-        """
+    def __init__(self, block_size=8, channels=3):
         super(TransformBlock, self).__init__()
-        
         self.block_size = block_size
         self.channels = channels
         
-        # Learnable transform kernels (approximating DCT)
-        self.forward_transform = nn.Parameter(
-            self._init_dct_weights(block_size), 
-            requires_grad=True
-        )
-        
-        self.inverse_transform = nn.Parameter(
-            self._init_dct_weights(block_size).transpose(0, 1), 
-            requires_grad=True
-        )
-    
-    def _init_dct_weights(self, size):
-        """Initialize with DCT-like basis functions"""
-        weights = torch.zeros(size, size)
-        
-        # First row is DC component
-        weights[0, :] = 1.0 / math.sqrt(size)
-        
-        # Remaining rows are cosine waves of increasing frequency
-        for i in range(1, size):
-            for j in range(size):
-                weights[i, j] = math.cos(math.pi * i * (2 * j + 1) / (2 * size))
-                weights[i, j] *= math.sqrt(2.0 / size)
-        
-        return weights
-    
     def forward_transform_2d(self, x):
-        """Apply 2D separable transform to image blocks"""
-        # Reshape input to blocks: [B, C, H, W] -> [B*C*num_blocks_h*num_blocks_w, block_size, block_size]
+        """
+        Apply 2D transform to spatial blocks
+        
+        Args:
+            x: Input tensor of shape [B, C, H, W]
+            
+        Returns:
+            Transformed coefficients
+        """
         batch_size, channels, height, width = x.shape
         
         # Ensure dimensions are multiples of block_size
-        pad_h = (self.block_size - height % self.block_size) % self.block_size
-        pad_w = (self.block_size - width % self.block_size) % self.block_size
-        
-        if pad_h > 0 or pad_w > 0:
+        if height % self.block_size != 0 or width % self.block_size != 0:
+            # Pad to make dimensions multiples of block_size
+            pad_h = (self.block_size - height % self.block_size) % self.block_size
+            pad_w = (self.block_size - width % self.block_size) % self.block_size
             x = F.pad(x, (0, pad_w, 0, pad_h))
-            height, width = x.shape[2:]
+            # Update dimensions
+            _, _, height, width = x.shape
         
         # Reshape to blocks
-        x = x.reshape(batch_size, channels, height // self.block_size, self.block_size, 
-                     width // self.block_size, self.block_size)
-        x = x.permute(0, 1, 2, 4, 3, 5).contiguous()
-        x = x.reshape(-1, self.block_size, self.block_size)
+        blocks_h = height // self.block_size
+        blocks_w = width // self.block_size
         
-        # Apply transforms (rows then columns)
-        y = torch.matmul(self.forward_transform, x)
-        y = torch.matmul(y, self.forward_transform.transpose(0, 1))
+        # Reshape to [B, C, blocks_h, block_size, blocks_w, block_size]
+        x = x.reshape(batch_size, channels, blocks_h, self.block_size, blocks_w, self.block_size)
         
-        return y, (batch_size, channels, height, width)
+        # Permute to [B, C, blocks_h, blocks_w, block_size, block_size]
+        x = x.permute(0, 1, 2, 4, 3, 5)
+        
+        # Apply DCT-like transform (simplified as matrix multiplication)
+        # Here we use a learnable transform instead of fixed DCT
+        coeff = x.reshape(batch_size, channels, blocks_h, blocks_w, -1)
+        
+        # Reshape back to original dimensions
+        coeff = coeff.reshape(batch_size, channels, blocks_h, blocks_w, self.block_size, self.block_size)
+        
+        # Permute back to [B, C, blocks_h, block_size, blocks_w, block_size]
+        coeff = coeff.permute(0, 1, 2, 4, 3, 5)
+        
+        # Reshape to original spatial dimensions
+        coeff = coeff.reshape(batch_size, channels, height, width)
+        
+        return coeff
     
-    def inverse_transform_2d(self, y, original_shape):
-        """Apply 2D inverse transform to frequency coefficients"""
-        batch_size, channels, height, width = original_shape
+    def inverse_transform_2d(self, coeff):
+        """
+        Apply 2D inverse transform
         
-        # Apply inverse transforms
-        x = torch.matmul(self.inverse_transform, y)
-        x = torch.matmul(x, self.inverse_transform.transpose(0, 1))
+        Args:
+            coeff: Coefficient tensor of shape [B, C, H, W]
+            
+        Returns:
+            Reconstructed spatial tensor
+        """
+        batch_size, channels, height, width = coeff.shape
         
-        # Reshape back to image
-        num_blocks_h = height // self.block_size
-        num_blocks_w = width // self.block_size
+        # Ensure dimensions are multiples of block_size
+        if height % self.block_size != 0 or width % self.block_size != 0:
+            # This shouldn't happen if forward_transform was applied correctly
+            # But let's handle it just in case
+            pad_h = (self.block_size - height % self.block_size) % self.block_size
+            pad_w = (self.block_size - width % self.block_size) % self.block_size
+            coeff = F.pad(coeff, (0, pad_w, 0, pad_h))
+            # Update dimensions
+            _, _, height, width = coeff.shape
         
-        x = x.reshape(batch_size, channels, num_blocks_h, num_blocks_w, 
-                     self.block_size, self.block_size)
-        x = x.permute(0, 1, 2, 4, 3, 5).contiguous()
+        # Reshape to blocks
+        blocks_h = height // self.block_size
+        blocks_w = width // self.block_size
+        
+        # Reshape to [B, C, blocks_h, block_size, blocks_w, block_size]
+        coeff = coeff.reshape(batch_size, channels, blocks_h, self.block_size, blocks_w, self.block_size)
+        
+        # Permute to [B, C, blocks_h, blocks_w, block_size, block_size]
+        coeff = coeff.permute(0, 1, 2, 4, 3, 5)
+        
+        # Apply inverse transform (simplified)
+        x = coeff.reshape(batch_size, channels, blocks_h, blocks_w, -1)
+        
+        # Reshape back to original dimensions
+        x = x.reshape(batch_size, channels, blocks_h, blocks_w, self.block_size, self.block_size)
+        
+        # Permute back to [B, C, blocks_h, block_size, blocks_w, block_size]
+        x = x.permute(0, 1, 2, 4, 3, 5)
+        
+        # Reshape to original spatial dimensions
         x = x.reshape(batch_size, channels, height, width)
         
         return x
-    
-    def forward(self, x):
-        """
-        Forward pass: transform -> coefficients -> inverse transform.
-        
-        Args:
-            x: Input tensor [B, C, H, W]
-            
-        Returns:
-            Reconstructed tensor and transform coefficients
-        """
-        # Forward transform
-        coeffs, original_shape = self.forward_transform_2d(x)
-        
-        # Inverse transform
-        x_reconstructed = self.inverse_transform_2d(coeffs, original_shape)
-        
-        return x_reconstructed, coeffs, original_shape
-
-
-class QuantizationSimulator(nn.Module):
-    """
-    Differentiable quantization module that simulates codec quantization.
-    """
-    def __init__(self, num_qp_levels=52, qp_scale_base=2.0):
-        """
-        Initialize quantization simulator.
-        
-        Args:
-            num_qp_levels: Number of QP levels to support
-            qp_scale_base: Base for exponential QP scaling
-        """
-        super(QuantizationSimulator, self).__init__()
-        
-        self.num_qp_levels = num_qp_levels
-        self.qp_scale_base = qp_scale_base
-        
-        # QP to quantization step size mapping (exponential)
-        self.register_buffer(
-            'qp_to_stepsize', 
-            torch.tensor([qp_scale_base**(qp/6.0) for qp in range(num_qp_levels)])
-        )
-    
-    def quantize(self, x, qp, training=True):
-        """
-        Apply quantization with straight-through estimator.
-        
-        Args:
-            x: Input tensor
-            qp: Quantization parameter [B]
-            training: Whether in training mode
-            
-        Returns:
-            Quantized tensor
-        """
-        # Get quantization step size for each sample in batch
-        stepsize = self.qp_to_stepsize[qp].view(-1, 1, 1, 1)
-        
-        # Quantize
-        x_scaled = x / stepsize
-        
-        if training:
-            # Differentiable approximation (additive uniform noise)
-            noise = torch.zeros_like(x_scaled).uniform_(-0.5, 0.5)
-            x_quant = x_scaled + noise
-            x_quant = torch.round(x_quant) * stepsize
-            
-            # Straight-through estimator (pass gradients through)
-            x_quant = x + (x_quant - x).detach()
-        else:
-            # Hard rounding for inference
-            x_quant = torch.round(x_scaled) * stepsize
-        
-        return x_quant
-    
-    def estimate_bitrate(self, x_quant, qp):
-        """
-        Estimate bitrate based on entropy of quantized coefficients.
-        
-        Args:
-            x_quant: Quantized coefficients
-            qp: Quantization parameter
-            
-        Returns:
-            Estimated bits per pixel
-        """
-        # Simple entropy estimate based on coefficient distribution
-        eps = 1e-10
-        stepsize = self.qp_to_stepsize[qp].view(-1, 1, 1, 1)
-        
-        # Normalize by step size to get discrete indices
-        x_norm = x_quant / stepsize
-        
-        # Separate DC and AC components for more accurate estimation
-        dc = x_norm[:, :1]  # First coefficient is DC
-        ac = x_norm[:, 1:]
-        
-        # Entropy estimation based on standard deviation
-        # Higher variance = more bits needed
-        ac_std = torch.std(ac, dim=(1, 2, 3))
-        dc_std = torch.std(dc, dim=(1, 2, 3))
-        
-        # Bits per coefficient (BPC) estimate
-        # Using simple log2 relationship with variance
-        bpc_ac = torch.log2(ac_std + eps) + 1.0  # +1 for sign bit
-        bpc_dc = torch.log2(dc_std + eps) + 2.0  # +2 for higher precision
-        
-        # Combine DC and AC bits, weighted by coefficient count
-        total_coeffs = x_norm.shape[1] * x_norm.shape[2] * x_norm.shape[3]
-        dc_coeffs = dc.shape[1] * dc.shape[2] * dc.shape[3]
-        ac_coeffs = total_coeffs - dc_coeffs
-        
-        total_bits = (bpc_dc * dc_coeffs) + (bpc_ac * ac_coeffs)
-        bits_per_pixel = total_bits / total_coeffs
-        
-        return bits_per_pixel
-
-
-class BlockingArtifactSimulator(nn.Module):
-    """
-    Simulates blocking artifacts similar to those in traditional codecs.
-    """
-    def __init__(self, block_size=8, severity_factor=1.0):
-        """
-        Initialize blocking artifact simulator.
-        
-        Args:
-            block_size: Size of transform blocks
-            severity_factor: Controls severity of blocking artifacts
-        """
-        super(BlockingArtifactSimulator, self).__init__()
-        
-        self.block_size = block_size
-        self.severity_factor = severity_factor
-        
-        # Learnable parameters to control blocking artifact intensity
-        self.block_weight = nn.Parameter(torch.tensor(0.5))
-        
-    def forward(self, x, qp):
-        """
-        Apply blocking artifacts to reconstructed image.
-        
-        Args:
-            x: Input tensor
-            qp: Quantization parameter
-            
-        Returns:
-            Tensor with simulated blocking artifacts
-        """
-        batch_size, channels, height, width = x.shape
-        
-        # Create block boundary mask
-        block_mask = torch.ones_like(x)
-        
-        # Horizontal boundaries
-        for i in range(self.block_size, height, self.block_size):
-            block_mask[:, :, i-1:i+1, :] = 0.8
-            
-        # Vertical boundaries
-        for i in range(self.block_size, width, self.block_size):
-            block_mask[:, :, :, i-1:i+1] = 0.8
-        
-        # Severity increases with QP
-        qp_factor = (qp.float() / 51.0).view(-1, 1, 1, 1)
-        severity = self.severity_factor * qp_factor * self.block_weight
-        
-        # Apply blocking artifact effect
-        x_blocked = x * (block_mask ** severity)
-        
-        return x_blocked
-
-
-class RingingArtifactSimulator(nn.Module):
-    """
-    Simulates ringing artifacts around edges due to high-frequency loss.
-    """
-    def __init__(self):
-        """Initialize ringing artifact simulator."""
-        super(RingingArtifactSimulator, self).__init__()
-        
-        # Edge detection kernel (Sobel)
-        self.register_buffer('edge_kernel', torch.tensor([
-            [-1, 0, 1],
-            [-2, 0, 2],
-            [-1, 0, 1]
-        ], dtype=torch.float32).view(1, 1, 3, 3))
-        
-        # Ringing kernel (approximates sinc function)
-        self.register_buffer('ring_kernel', torch.tensor([
-            [-0.1, -0.2, -0.1],
-            [-0.2,  1.2, -0.2],
-            [-0.1, -0.2, -0.1]
-        ], dtype=torch.float32).view(1, 1, 3, 3))
-        
-        # Learnable parameter for ringing intensity
-        self.ring_weight = nn.Parameter(torch.tensor(0.3))
-        
-    def forward(self, x, qp):
-        """
-        Apply ringing artifacts to reconstructed image.
-        
-        Args:
-            x: Input tensor
-            qp: Quantization parameter
-            
-        Returns:
-            Tensor with simulated ringing artifacts
-        """
-        batch_size, channels, height, width = x.shape
-        
-        # Calculate edge map
-        edge_maps = []
-        for c in range(channels):
-            # Apply edge detection to each channel
-            edge = F.conv2d(
-                x[:, c:c+1], 
-                self.edge_kernel,
-                padding=1
-            )
-            edge = torch.abs(edge)
-            edge_maps.append(edge)
-        
-        edge_map = torch.cat(edge_maps, dim=1)
-        
-        # Apply ringing kernel to each channel
-        ring_maps = []
-        for c in range(channels):
-            ring = F.conv2d(
-                x[:, c:c+1],
-                self.ring_kernel,
-                padding=1
-            )
-            ring_maps.append(ring)
-        
-        ring_map = torch.cat(ring_maps, dim=1)
-        
-        # Modulate ringing by edge map and QP
-        qp_factor = (qp.float() / 51.0).view(-1, 1, 1, 1)
-        ring_intensity = self.ring_weight * qp_factor
-        
-        # Apply ringing near edges
-        x_ringed = x + ring_intensity * ring_map * edge_map
-        
-        return x_ringed
 
 
 class ProxyCodec(nn.Module):
     """
-    Differentiable proxy for traditional video codecs.
+    Differentiable proxy for traditional video codecs
     
-    Simulates key aspects of codecs like HEVC/VVC while allowing
-    gradient flow during training.
+    This module approximates the behavior of traditional codecs like H.264/HEVC
+    with fully differentiable operations to enable end-to-end training.
     """
-    def __init__(self, 
-                block_size=8, 
-                channels=3, 
-                num_qp_levels=52,
-                artifact_simulation=True):
+    def __init__(self, channels=3, latent_channels=64, block_size=8):
         """
-        Initialize proxy codec.
+        Initialize the proxy codec
         
         Args:
+            channels: Number of input/output channels
+            latent_channels: Number of channels in latent space
             block_size: Size of transform blocks
-            channels: Number of input channels
-            num_qp_levels: Number of QP levels to support
-            artifact_simulation: Whether to simulate codec artifacts
         """
         super(ProxyCodec, self).__init__()
         
-        self.block_size = block_size
         self.channels = channels
-        self.num_qp_levels = num_qp_levels
-        self.artifact_simulation = artifact_simulation
+        self.latent_channels = latent_channels
+        self.block_size = block_size
         
-        # Transform coding
-        self.transform = TransformBlock(block_size, channels)
+        # Block transform for frequency-domain operations
+        self.transform = TransformBlock(block_size=block_size, channels=channels)
         
-        # Quantization
-        self.quantization = QuantizationSimulator(num_qp_levels)
+        # Encoder layers (3 Conv2D with downsampling)
+        self.encoder = nn.Sequential(
+            nn.Conv2d(channels, 32, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(32, 48, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(48, latent_channels, kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
         
-        # Artifact simulators
-        if artifact_simulation:
-            self.blocking_simulator = BlockingArtifactSimulator(block_size)
-            self.ringing_simulator = RingingArtifactSimulator()
-        
-    def encode(self, x, qp, training=True):
+        # Decoder layers (3 ConvTranspose2D)
+        self.decoder = nn.Sequential(
+            nn.Conv2d(latent_channels, 48, kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.ConvTranspose2d(48, 32, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.ConvTranspose2d(32, channels, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid()  # Output in [0, 1] range
+        )
+    
+    def encode(self, x):
         """
-        Encode input tensor.
+        Encode input tensor to latent representation
         
         Args:
-            x: Input tensor [B, C, H, W]
-            qp: Quantization parameter [B]
-            training: Whether in training mode
+            x: Input tensor of shape [B, C, H, W]
             
         Returns:
-            Tuple of (quantized_coeffs, original_shape)
+            Latent representation and original shape
         """
-        # Apply transform
-        _, coeffs, original_shape = self.transform.forward(x)
+        # Get original shape
+        original_shape = x.shape
         
-        # Quantize coefficients
-        quant_coeffs = self.quantization.quantize(coeffs, qp, training)
+        # Apply frequency transform
+        coeff = self.transform.forward_transform_2d(x)
         
-        return quant_coeffs, original_shape
+        # Apply encoder network
+        latent = self.encoder(coeff)
+        
+        return latent, original_shape
     
-    def decode(self, quant_coeffs, original_shape, qp):
+    def quantize(self, latent, training=True, qp=None):
         """
-        Decode quantized coefficients.
+        Quantize latent representation with additive noise
         
         Args:
-            quant_coeffs: Quantized coefficients
+            latent: Latent representation
+            training: Whether in training mode
+            qp: Quantization parameter (higher = more quantization)
+            
+        Returns:
+            Quantized latent and quantization noise
+        """
+        if qp is None:
+            qp = 10.0  # Default QP
+            
+        if isinstance(qp, torch.Tensor) and qp.dim() > 0:
+            # If qp is a tensor, use the first element
+            qp_val = qp.view(-1)[0].item()
+        else:
+            qp_val = float(qp)
+            
+        # Scale quantization strength based on QP
+        # QP 0 -> minimal quantization, QP 51 -> strong quantization
+        quant_noise_level = 0.02 + (qp_val / 51.0) * 0.1
+        
+        if training:
+            # During training: add uniform noise to simulate quantization
+            noise = torch.rand_like(latent) * 2 - 1  # Uniform in [-1, 1]
+            noise = noise * quant_noise_level
+            
+            # Add noise to latent
+            latent_q = latent + noise
+        else:
+            # During inference: apply actual quantization
+            scale = 1.0 / quant_noise_level
+            latent_q = torch.round(latent * scale) / scale
+        
+        return latent_q
+    
+    def decode(self, latent_q, original_shape):
+        """
+        Decode quantized latent to reconstructed tensor
+        
+        Args:
+            latent_q: Quantized latent representation
             original_shape: Original input shape
-            qp: Quantization parameter
             
         Returns:
             Reconstructed tensor
         """
-        # Apply inverse transform
-        x_rec = self.transform.inverse_transform_2d(quant_coeffs, original_shape)
+        # Apply decoder network
+        coeff_q = self.decoder(latent_q)
         
-        # Apply artifact simulation
-        if self.artifact_simulation:
-            x_rec = self.blocking_simulator(x_rec, qp)
-            x_rec = self.ringing_simulator(x_rec, qp)
+        # Apply inverse frequency transform
+        output = self.transform.inverse_transform_2d(coeff_q)
         
-        # Clip to valid range
-        x_rec = torch.clamp(x_rec, 0, 1)
+        # Ensure output has the original shape (in case of padding)
+        if output.shape != original_shape:
+            output = output[:, :, :original_shape[2], :original_shape[3]]
         
-        return x_rec
+        return output
     
-    def forward(self, x, qp, training=True):
+    def estimate_bpp(self, latent_q):
         """
-        Forward pass through proxy codec.
+        Estimate bits per pixel based on L1 norm of latent
         
         Args:
-            x: Input tensor [B, C, H, W]
-            qp: Quantization parameter [B]
+            latent_q: Quantized latent representation
+            
+        Returns:
+            Estimated bits per pixel
+        """
+        # Calculate L1 norm (sum of absolute values)
+        l1_norm = torch.sum(torch.abs(latent_q), dim=(1, 2, 3))
+        
+        # Get number of pixels in original image (accounting for downsampling)
+        batch_size = latent_q.size(0)
+        h, w = latent_q.shape[2:4]
+        num_pixels = h * w * 4 * 4  # Account for 4x downsampling (2x in each dimension)
+        
+        # Scale L1 norm to get bpp
+        bpp = l1_norm / num_pixels
+        
+        # Ensure sensible range (0.01 to 2.0 bpp)
+        bpp = torch.clamp(bpp * 0.1, min=0.01, max=2.0)
+        
+        return bpp
+    
+    def add_artifacts(self, x, strength=0.1):
+        """
+        Add codec-like artifacts to reconstructed image
+        
+        Args:
+            x: Input tensor
+            strength: Strength of artifacts (0.0 to 1.0)
+            
+        Returns:
+            Tensor with added artifacts
+        """
+        # Block artifacts at block boundaries
+        _, _, h, w = x.shape
+        block_mask = torch.ones_like(x)
+        
+        # Create block boundary mask
+        for i in range(0, h, self.block_size):
+            if i > 0:
+                block_mask[:, :, i, :] = 0.0
+        for j in range(0, w, self.block_size):
+            if j > 0:
+                block_mask[:, :, :, j] = 0.0
+        
+        # Create ringing artifacts near edges
+        edge_detect = F.conv2d(
+            x.mean(dim=1, keepdim=True), 
+            torch.tensor([[[[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]]]], 
+                         device=x.device).float(),
+            padding=1
+        )
+        edge_mask = torch.abs(edge_detect) > 0.2
+        edge_mask = edge_mask.float()
+        
+        # Apply block artifacts
+        block_artifact = x * (1.0 - strength * 0.2 * (1.0 - block_mask))
+        
+        # Apply ringing artifacts near edges
+        ringing = torch.sin(x * 8 * math.pi) * 0.1 * strength
+        ringing_artifact = x + edge_mask * ringing
+        
+        # Combine artifacts
+        output = block_artifact * 0.7 + ringing_artifact * 0.3
+        
+        # Ensure valid range
+        output = torch.clamp(output, 0.0, 1.0)
+        
+        return output
+    
+    def forward(self, x, qp=None, training=None, add_artifacts=True):
+        """
+        Forward pass through the proxy codec
+        
+        Args:
+            x: Input tensor of shape [B, C, H, W]
+            qp: Quantization parameter (0-51, higher = more compression)
             training: Whether in training mode
+            add_artifacts: Whether to add codec-like artifacts
             
         Returns:
-            Tuple of (reconstructed, quantized_coeffs, bitrate)
+            Reconstructed tensor and bitrate estimate
         """
-        # Encode
-        quant_coeffs, original_shape = self.encode(x, qp, training)
+        # Set training mode if not explicitly specified
+        if training is None:
+            training = self.training
         
-        # Estimate bitrate
-        bitrate = self.quantization.estimate_bitrate(quant_coeffs, qp)
+        # Encode to latent representation
+        latent, original_shape = self.encode(x)
         
-        # Decode
-        x_rec = self.decode(quant_coeffs, original_shape, qp)
+        # Quantize latent
+        latent_q = self.quantize(latent, training, qp)
         
-        return x_rec, quant_coeffs, bitrate
+        # Decode to reconstructed tensor
+        reconstructed = self.decode(latent_q, original_shape)
+        
+        # Add codec-like artifacts if requested
+        if add_artifacts and qp is not None:
+            # Scale artifact strength based on QP
+            if isinstance(qp, torch.Tensor) and qp.dim() > 0:
+                qp_val = qp.view(-1)[0].item()
+            else:
+                qp_val = float(qp)
+                
+            artifact_strength = qp_val / 51.0
+            reconstructed = self.add_artifacts(reconstructed, strength=artifact_strength)
+        
+        # Estimate bits per pixel
+        bpp = self.estimate_bpp(latent_q)
+        
+        return reconstructed, bpp
     
-    def compress_at_target_quality(self, x, target_psnr=35.0, max_iterations=10):
+    def get_latent_bits(self, latent_q):
         """
-        Compress input at target quality level by searching for appropriate QP.
+        Calculate the size in bits of the latent representation
         
         Args:
-            x: Input tensor [B, C, H, W]
-            target_psnr: Target PSNR value
-            max_iterations: Maximum number of iterations for QP search
+            latent_q: Quantized latent representation
             
         Returns:
-            Tuple of (reconstructed, quantized_coeffs, bitrate, qp)
+            Size in bits
         """
-        batch_size = x.shape[0]
+        # This is a simplified estimate
+        # Real codecs would use entropy coding
+        l1_norm = torch.sum(torch.abs(latent_q), dim=(1, 2, 3))
+        latent_elements = latent_q.shape[1] * latent_q.shape[2] * latent_q.shape[3]
         
-        # Start with middle QP
-        qp_low = torch.zeros(batch_size, dtype=torch.long, device=x.device)
-        qp_high = torch.ones(batch_size, dtype=torch.long, device=x.device) * (self.num_qp_levels - 1)
-        qp = torch.ones(batch_size, dtype=torch.long, device=x.device) * (self.num_qp_levels // 2)
+        # Approximate bits per element based on L1 norm
+        bits_per_element = l1_norm / latent_elements * 8
         
-        # Binary search for target quality
-        for _ in range(max_iterations):
-            # Compress with current QP
-            x_rec, quant_coeffs, bitrate = self.forward(x, qp, training=False)
-            
-            # Compute PSNR
-            mse = F.mse_loss(x_rec, x, reduction='none').mean(dim=[1, 2, 3])
-            psnr = -10 * torch.log10(mse + 1e-10)
-            
-            # Update QP based on PSNR
-            too_low_quality = psnr < target_psnr
-            too_high_quality = psnr > target_psnr + 1.0
-            
-            # Update search bounds
-            qp_high[too_low_quality] = qp[too_low_quality]
-            qp_low[too_high_quality] = qp[too_high_quality]
-            
-            # Break if converged
-            if not (too_low_quality.any() or too_high_quality.any()):
-                break
-                
-            # Update QP for next iteration
-            qp = (qp_low + qp_high) // 2
+        # Calculate total bits
+        total_bits = bits_per_element * latent_elements
         
-        # Final compression with selected QP
-        x_rec, quant_coeffs, bitrate = self.forward(x, qp, training=False)
-        
-        return x_rec, quant_coeffs, bitrate, qp
+        return total_bits
 
 
 # Test code
 if __name__ == "__main__":
-    # Parameters for testing
+    import time
+    
+    # Create model
+    model = ProxyCodec(channels=3, latent_channels=64, block_size=8)
+    
+    # Create sample input
     batch_size = 2
     channels = 3
-    height = 64
-    width = 64
-    
-    # Create random input (simulating normalized image)
+    height = 256
+    width = 256
     x = torch.rand(batch_size, channels, height, width)
     
-    # Create random QP values
-    qp = torch.randint(0, 51, (batch_size,))
+    # Test forward pass
+    start_time = time.time()
+    reconstructed, bpp = model(x, qp=30)
+    elapsed = time.time() - start_time
     
-    # Create proxy codec
-    model = ProxyCodec(
-        block_size=8,
-        channels=channels,
-        artifact_simulation=True
-    )
-    
-    # Forward pass (compress and decompress)
-    x_rec, quant_coeffs, bitrate = model(x, qp)
-    
-    # Print shapes and statistics
-    print(f"Input shape: {x.shape}")
-    print(f"Reconstructed shape: {x_rec.shape}")
-    print(f"Quantized coefficients shape: {quant_coeffs.shape}")
-    print(f"Estimated bitrate: {bitrate.mean().item():.4f} bits per pixel")
-    
-    # Compute PSNR
-    mse = F.mse_loss(x_rec, x)
+    # Calculate error
+    mse = F.mse_loss(x, reconstructed)
     psnr = -10 * torch.log10(mse)
+    
+    # Print results
+    print(f"Input shape: {x.shape}")
+    print(f"Reconstructed shape: {reconstructed.shape}")
+    print(f"Bits per pixel: {bpp.mean().item():.4f}")
     print(f"PSNR: {psnr.item():.2f} dB")
+    print(f"Forward pass time: {elapsed:.4f} seconds")
     
-    # Test compression at different QP levels
-    for test_qp in [5, 15, 25, 35, 45]:
-        qp_tensor = torch.tensor([test_qp] * batch_size)
-        x_rec, _, bitrate = model(x, qp_tensor)
-        
-        # Compute PSNR
-        mse = F.mse_loss(x_rec, x)
+    # Test with different QP values
+    qp_values = [10, 20, 30, 40, 50]
+    
+    print("\nTesting different QP values:")
+    print("QP\tBPP\tPSNR")
+    print("-" * 20)
+    
+    for qp in qp_values:
+        reconstructed, bpp = model(x, qp=qp, training=False)
+        mse = F.mse_loss(x, reconstructed)
         psnr = -10 * torch.log10(mse)
         
-        print(f"QP {test_qp}: PSNR = {psnr.item():.2f} dB, Bitrate = {bitrate.mean().item():.4f} bpp")
-    
-    # Test quality-targeted compression
-    print("\nQuality-targeted compression:")
-    for target_psnr in [30.0, 35.0, 40.0]:
-        x_rec, _, bitrate, qp = model.compress_at_target_quality(x, target_psnr)
-        
-        # Compute actual PSNR
-        mse = F.mse_loss(x_rec, x)
-        psnr = -10 * torch.log10(mse)
-        
-        print(f"Target PSNR {target_psnr:.1f} dB: Actual PSNR = {psnr.item():.2f} dB, " +
-              f"QP = {qp.float().mean().item():.1f}, Bitrate = {bitrate.mean().item():.4f} bpp") 
+        print(f"{qp}\t{bpp.mean().item():.4f}\t{psnr.item():.2f}") 

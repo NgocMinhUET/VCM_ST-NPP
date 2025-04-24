@@ -245,211 +245,225 @@ class STNPPDecoder(nn.Module):
         return x
 
 
+class TemporalShiftBlock(nn.Module):
+    """
+    Temporal Shift Block for efficient temporal modeling.
+    Shifts part of the channels along the temporal dimension, which allows 
+    for information exchange between neighboring frames.
+    """
+    def __init__(self, n_frames, n_div=8):
+        """
+        Initialize the Temporal Shift Block.
+        
+        Args:
+            n_frames: Number of frames in the input
+            n_div: Division factor for determining how many channels to shift
+        """
+        super(TemporalShiftBlock, self).__init__()
+        self.n_frames = n_frames
+        self.n_div = n_div
+        
+    def forward(self, x):
+        """
+        Apply temporal shift operation.
+        
+        Args:
+            x: Input tensor of shape [B, T, C, H, W]
+            
+        Returns:
+            Tensor after temporal shift of shape [B, T, C, H, W]
+        """
+        # Get dimensions
+        b, t, c, h, w = x.size()
+        
+        # Reshape tensor for easier channel manipulation
+        x = x.view(b, t, c, h * w)
+        
+        # Calculate number of channels to shift
+        fold = c // self.n_div
+        
+        # Keep the original tensor for combining later
+        out = torch.zeros_like(x)
+        
+        # Shift 1/n_div of the channels forward (to the right in temporal dimension)
+        out[:, 1:, :fold] = x[:, :-1, :fold]  # shift left->right
+        out[:, 0, :fold] = x[:, 0, :fold]  # first frame doesn't receive data
+        
+        # Shift 1/n_div of the channels backward (to the left in temporal dimension)
+        out[:, :-1, fold:fold*2] = x[:, 1:, fold:fold*2]  # shift right->left
+        out[:, -1, fold:fold*2] = x[:, -1, fold:fold*2]  # last frame doesn't receive data
+        
+        # Keep the rest of the channels unchanged
+        out[:, :, fold*2:] = x[:, :, fold*2:]
+        
+        # Reshape back to original format
+        return out.view(b, t, c, h, w)
+
+
+class SpatialBlock(nn.Module):
+    """
+    Spatial processing block consisting of multiple 2D convolution layers.
+    """
+    def __init__(self, in_channels, out_channels, hidden_channels=64, n_layers=3):
+        """
+        Initialize the spatial processing block.
+        
+        Args:
+            in_channels: Number of input channels
+            out_channels: Number of output channels
+            hidden_channels: Number of channels in hidden layers
+            n_layers: Number of convolutional layers
+        """
+        super(SpatialBlock, self).__init__()
+        
+        layers = []
+        current_in_channels = in_channels
+        
+        for i in range(n_layers):
+            # For the last layer, use out_channels as output size
+            if i == n_layers - 1:
+                next_channels = out_channels
+            else:
+                next_channels = hidden_channels
+            
+            layers.append(nn.Conv2d(
+                current_in_channels, 
+                next_channels, 
+                kernel_size=3, 
+                stride=1, 
+                padding=1
+            ))
+            
+            # Add ReLU activation except for the last layer
+            if i < n_layers - 1:
+                layers.append(nn.ReLU(inplace=True))
+            
+            current_in_channels = next_channels
+        
+        self.conv_block = nn.Sequential(*layers)
+    
+    def forward(self, x):
+        """
+        Apply spatial convolution block.
+        
+        Args:
+            x: Input tensor of shape [B, C, H, W]
+            
+        Returns:
+            Processed tensor of shape [B, out_channels, H, W]
+        """
+        return self.conv_block(x)
+
+
 class STNPP(nn.Module):
     """
-    Complete ST-NPP model combining encoder and decoder
+    Spatio-Temporal Neural Pre-Processing (STNPP) module.
+    Takes a sequence of frames and enhances the center frame using
+    temporal and spatial information.
     """
-    def __init__(self, channels=3, latent_channels=32, time_steps=16, time_reduction=4):
+    def __init__(self, channels=3, hidden_channels=64, temporal_kernel_size=3, use_attention=False):
+        """
+        Initialize the STNPP module.
+        
+        Args:
+            channels: Number of channels in input/output frames (default: 3 for RGB)
+            hidden_channels: Number of channels in hidden layers
+            temporal_kernel_size: Number of frames to process (unused, kept for API consistency)
+            use_attention: Whether to use attention mechanisms (unused, kept for API consistency)
+        """
         super(STNPP, self).__init__()
         
-        self.channels = channels
-        self.latent_channels = latent_channels
-        self.time_steps = time_steps
-        self.time_reduction = time_reduction
+        # Temporal shift block for efficient temporal modeling
+        self.temporal_shift = TemporalShiftBlock(n_frames=5)
         
-        # Create encoder and decoder
-        self.encoder = STNPPEncoder(
+        # Spatial processing block
+        self.spatial_block = SpatialBlock(
             in_channels=channels,
-            latent_channels=latent_channels,
-            time_steps=time_steps,
-            time_reduction=time_reduction
-        )
-        
-        self.decoder = STNPPDecoder(
             out_channels=channels,
-            latent_channels=latent_channels,
-            time_steps=time_steps,
-            time_reduction=time_reduction
+            hidden_channels=hidden_channels,
+            n_layers=3
         )
         
     def forward(self, x):
         """
-        Forward pass of ST-NPP
+        Process a sequence of frames and enhance the center frame.
         
         Args:
-            x: Input video tensor [B, C, T, H, W]
+            x: Input tensor of shape [B, T, C, H, W] or [B, C, T, H, W]
             
         Returns:
-            Reconstructed video and latent representation
+            Enhanced center frame of shape [B, C, H, W]
         """
-        # Get input dimensions
-        original_time = x.size(2)
+        # Ensure input is in format [B, T, C, H, W]
+        if x.size(1) == 3 and x.size(2) == 5:  # If input is [B, C, T, H, W]
+            x = x.permute(0, 2, 1, 3, 4)  # Convert to [B, T, C, H, W]
         
-        # Encode
-        latent = self.encoder(x)
+        # Apply temporal shift
+        x = self.temporal_shift(x)
         
-        # Decode
-        reconstructed = self.decoder(latent, target_time=original_time)
+        # Extract center frame (index 2)
+        center_frame = x[:, 2]  # Shape: [B, C, H, W]
         
-        return reconstructed, latent
-    
-    def get_compression_stats(self, batch_size, time_steps, height, width):
-        """
-        Calculate compression statistics
+        # Apply spatial processing
+        enhanced_frame = self.spatial_block(center_frame)
         
-        Args:
-            batch_size: Batch size
-            time_steps: Number of time steps
-            height: Height of video
-            width: Width of video
-            
-        Returns:
-            Compression ratio and latent dimensions
-        """
-        # Calculate original size
-        original_pixels = batch_size * self.channels * time_steps * height * width
+        # Add residual connection
+        output = center_frame + enhanced_frame
         
-        # Calculate latent size
-        latent_time = time_steps // self.time_reduction
-        latent_height = height // 4
-        latent_width = width // 4
-        latent_pixels = batch_size * self.latent_channels * latent_time * latent_height * latent_width
-        
-        # Calculate compression ratio
-        compression_ratio = original_pixels / latent_pixels
-        
-        # Latent dimensions
-        latent_dims = (batch_size, self.latent_channels, latent_time, latent_height, latent_width)
-        
-        return compression_ratio, latent_dims
+        return output
 
 
 class STNPPWithQuantization(nn.Module):
     """
-    ST-NPP model with quantization for actual compression
+    STNPP with additional quantization functionality.
+    This extended version prepares features for compression.
     """
-    def __init__(self, channels=3, latent_channels=32, time_steps=16, time_reduction=4, num_quantize_levels=256):
+    def __init__(self, channels=3, feature_channels=64, temporal_kernel_size=3, use_attention=False):
+        """
+        Initialize the STNPP with quantization module.
+        
+        Args:
+            channels: Number of channels in input frames (default: 3 for RGB)
+            feature_channels: Number of channels in feature space
+            temporal_kernel_size: Number of frames to process (unused, kept for API consistency)
+            use_attention: Whether to use attention mechanisms (unused, kept for API consistency)
+        """
         super(STNPPWithQuantization, self).__init__()
         
-        # Base ST-NPP model
-        self.stnpp = STNPP(channels, latent_channels, time_steps, time_reduction)
+        # Base STNPP processing
+        self.stnpp = STNPP(
+            channels=channels, 
+            hidden_channels=feature_channels,
+            temporal_kernel_size=temporal_kernel_size,
+            use_attention=use_attention
+        )
         
-        # Number of quantization levels (e.g. 256 for 8-bit quantization)
-        self.num_quantize_levels = num_quantize_levels
+        # Additional layers for feature transformation
+        self.to_features = nn.Conv2d(channels, feature_channels, kernel_size=3, padding=1)
+        self.from_features = nn.Conv2d(feature_channels, channels, kernel_size=3, padding=1)
         
-        # Register scale and zero point for quantization
-        self.register_buffer('scale', torch.tensor(1.0))
-        self.register_buffer('zero_point', torch.tensor(0.0))
-        
-    def update_quantization_params(self, latent):
+    def forward(self, x):
         """
-        Update quantization parameters based on latent activation statistics
+        Process frames and convert to feature space.
         
         Args:
-            latent: Latent tensor
+            x: Input tensor of shape [B, T, C, H, W] or [B, C, T, H, W]
             
         Returns:
-            Updated scale and zero point
+            Tuple of (reconstructed_frames, features):
+                - reconstructed_frames: Tensor of shape [B, C, H, W]
+                - features: Tensor of shape [B, feature_channels, H, W]
         """
-        # Find min and max values
-        min_val = torch.min(latent)
-        max_val = torch.max(latent)
+        # Process through base STNPP
+        enhanced_frame = self.stnpp(x)
         
-        # Compute scale and zero point for quantization
-        range_val = max_val - min_val
-        self.scale = range_val / (self.num_quantize_levels - 1)
-        self.zero_point = min_val
+        # Convert to feature space
+        features = self.to_features(enhanced_frame)
         
-        return self.scale, self.zero_point
+        # Reconstruct from features
+        reconstructed = self.from_features(features)
         
-    def quantize(self, latent, update_params=True):
-        """
-        Quantize latent representation
-        
-        Args:
-            latent: Latent tensor
-            update_params: Whether to update quantization parameters
-            
-        Returns:
-            Quantized latent and dequantized latent for reconstruction
-        """
-        # Update quantization parameters if needed
-        if update_params:
-            self.update_quantization_params(latent)
-            
-        # Quantize: x_q = round((x - zero_point) / scale)
-        latent_q = torch.round((latent - self.zero_point) / self.scale)
-        
-        # Clamp to quantization range
-        latent_q = torch.clamp(latent_q, 0, self.num_quantize_levels - 1)
-        
-        # Dequantize: x_dq = x_q * scale + zero_point
-        latent_dq = latent_q * self.scale + self.zero_point
-        
-        return latent_q, latent_dq
-    
-    def estimate_bitrate(self, latent_q, height, width):
-        """
-        Estimate bitrate for the quantized latent
-        
-        Args:
-            latent_q: Quantized latent tensor
-            height: Original height of video
-            width: Original width of video
-            
-        Returns:
-            Bitrate in bits per pixel
-        """
-        # Calculate bits per element in latent
-        bits_per_element = torch.log2(torch.tensor(self.num_quantize_levels, dtype=torch.float))
-        
-        # Total bits
-        total_elements = torch.numel(latent_q)
-        total_bits = total_elements * bits_per_element
-        
-        # Original number of pixels
-        batch_size = latent_q.size(0)
-        time_steps = self.stnpp.time_steps
-        original_pixels = batch_size * time_steps * height * width
-        
-        # Bits per pixel
-        bpp = total_bits / original_pixels
-        
-        return bpp
-        
-    def forward(self, x, training=True):
-        """
-        Forward pass with quantization
-        
-        Args:
-            x: Input video tensor [B, C, T, H, W]
-            training: Whether in training mode
-            
-        Returns:
-            Reconstructed video, quantized latent, and bitrate estimate
-        """
-        # Get dimensions
-        batch_size, _, _, height, width = x.shape
-        
-        # Encode
-        reconstructed, latent = self.stnpp(x)
-        
-        # Apply quantization
-        if training:
-            # In training, use straight-through estimator
-            latent_q, latent_dq = self.quantize(latent)
-            latent_dq = latent + (latent_dq - latent).detach()  # STE
-        else:
-            # In inference, use actual quantization
-            latent_q, latent_dq = self.quantize(latent)
-            
-        # Decode quantized latent
-        reconstructed_q = self.stnpp.decoder(latent_dq)
-        
-        # Estimate bitrate
-        bpp = self.estimate_bitrate(latent_q, height, width)
-        
-        return reconstructed_q, latent_q, bpp
+        return reconstructed, features
 
 
 # Test code
@@ -466,9 +480,9 @@ if __name__ == "__main__":
     # Create model
     model = STNPP(
         channels=channels,
-        latent_channels=latent_channels,
-        time_steps=time_steps,
-        time_reduction=time_reduction
+        hidden_channels=latent_channels,
+        temporal_kernel_size=time_reduction,
+        use_attention=False
     )
     
     # Calculate theoretical compression
@@ -483,12 +497,11 @@ if __name__ == "__main__":
     
     # Forward pass
     start_time = time.time()
-    reconstructed, latent = model(x)
+    reconstructed = model(x)
     elapsed = time.time() - start_time
     
     # Print shapes
     print(f"Input shape: {x.shape}")
-    print(f"Latent shape: {latent.shape}")
     print(f"Reconstructed shape: {reconstructed.shape}")
     print(f"Forward pass time: {elapsed:.4f} seconds")
     
@@ -506,18 +519,17 @@ if __name__ == "__main__":
     print("\nTesting quantized model:")
     quantized_model = STNPPWithQuantization(
         channels=channels,
-        latent_channels=latent_channels,
-        time_steps=time_steps,
-        time_reduction=time_reduction
+        feature_channels=latent_channels,
+        temporal_kernel_size=time_reduction,
+        use_attention=False
     )
     
     # Forward pass with quantization
-    reconstructed_q, latent_q, bpp = quantized_model(x)
+    reconstructed_q, features = quantized_model(x)
     
     # Print results
-    print(f"Quantized latent shape: {latent_q.shape}")
     print(f"Reconstructed (with quantization) shape: {reconstructed_q.shape}")
-    print(f"Estimated bitrate: {bpp.item():.4f} bits per pixel")
+    print(f"Features shape: {features.shape}")
     
     # Calculate reconstruction error with quantization
     mse_q = F.mse_loss(x, reconstructed_q)

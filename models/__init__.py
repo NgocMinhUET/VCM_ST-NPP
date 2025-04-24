@@ -13,4 +13,8 @@ from models.qal import QAL
 from models.proxy_codec import ProxyCodec
 from models.combined_model import TaskAwareVideoProcessor
 
-__all__ = ['STNPP', 'QAL', 'ProxyCodec', 'TaskAwareVideoProcessor'] 
+__all__ = ['STNPP', 'QAL', 'ProxyCodec', 'TaskAwareVideoProcessor']
+
+"""
+Models package initialization.
+""" 

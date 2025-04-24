@@ -1,0 +1,163 @@
+# Configuration for MOT16 tracking task
+
+# Common parameters
+device: cuda
+seed: 42
+num_workers: 4
+batch_size: 8
+clip_length: 16
+image_size: [256, 256]
+
+# ST-NPP configuration
+stnpp:
+  backbone: resnet18
+  pretrained: true
+  
+  # Spatial branch
+  spatial_channels: 64
+  spatial_layers: 4
+  
+  # Temporal branch
+  temporal_type: 3dcnn
+  temporal_channels: 64
+  temporal_layers: 2
+  
+  # Fusion
+  fusion_type: attention
+  output_channels: 128
+  
+  # Downsampling
+  downsample_factor: 2
+  temporal_reduction: 2
+
+# QAL configuration
+qal:
+  # Model architecture
+  hidden_layers: [256, 256]
+  activation: relu
+  dropout: 0.1
+  
+  # Quantization parameters
+  num_centers: 256
+  feature_dim: 128
+  temperature: 1.0
+  
+  # QP adaptation
+  qp_embedding_dim: 32
+  min_qp: 0
+  max_qp: 51
+  
+  # Rate-distortion optimization
+  use_importance_map: true
+  importance_channels: 1
+
+# Proxy codec configuration
+proxy_codec:
+  # Architecture
+  base_channels: 64
+  num_layers: 4
+  use_attention: true
+  
+  # Training
+  pretrain_epochs: 100
+  loss_type: mse+lpips
+  
+  # QP modeling
+  qp_conditioning: true
+  qp_embedding_dim: 32
+  
+  # Rate modeling
+  estimate_bitrate: true
+  bitrate_lambda: 0.01
+
+# Tracking configuration
+tracking:
+  # Architecture
+  backbone: resnet18
+  feature_dim: 256
+  
+  # Correlation
+  correlation_size: 15
+  response_size: 31
+  
+  # Box regression
+  use_box_regression: true
+  regression_layers: [256, 64]
+  
+  # Training
+  template_size: [127, 127]
+  search_size: [255, 255]
+  pos_threshold: 0.6
+  neg_threshold: 0.3
+
+# End-to-end training configuration
+end2end:
+  # Components to use
+  use_stnpp: true
+  use_qal: true
+  use_proxy: true
+  task: tracking
+  
+  # Training parameters
+  epochs: 100
+  lr: 0.0001
+  weight_decay: 0.0001
+  lr_scheduler: cosine
+  
+  # Loss weights
+  task_loss_weight: 1.0
+  distortion_loss_weight: 0.1
+  rate_loss_weight: 0.01
+  
+  # Quality presets
+  qp_values: [22, 27, 32, 37]
+  
+  # Checkpointing
+  save_frequency: 10
+  checkpoint_dir: checkpoints/tracking
+
+# Evaluation configuration
+evaluation:
+  # Components to use
+  use_stnpp: true
+  use_qal: true
+  use_real_codec: true
+  task: tracking
+  
+  # Codec parameters
+  codec: libx265
+  qp_values: [22, 27, 32, 37]
+  preset: medium
+  
+  # Metrics
+  calculate_psnr: true
+  calculate_ssim: true
+  calculate_lpips: false
+  calculate_bpp: true
+  
+  # Tracking-specific metrics
+  calculate_mota: true
+  calculate_idf1: true
+  calculate_id_switches: true
+  
+  # Visualization
+  generate_visualizations: true
+  save_encoded_videos: true
+  num_vis_examples: 5
+
+# Dataset configuration
+dataset:
+  name: MOT16
+  train_path: data/processed/MOT16/train
+  val_path: data/processed/MOT16/val
+  test_path: data/processed/MOT16/test
+  
+  # Data processing
+  preprocess_method: default
+  normalize: true
+  use_augmentation: true
+  
+  # Tracking-specific
+  template_frames: 1
+  search_frames: 3
+  max_object_ids: 100 
