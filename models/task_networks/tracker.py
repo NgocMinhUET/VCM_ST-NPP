@@ -848,6 +848,34 @@ class VideoObjectTracker(nn.Module):
             "ids": all_ids
         }
 
+class DummyTracker(nn.Module):
+    """
+    A simplified tracker that can be used for testing or as a placeholder.
+    This tracker applies a simple convolutional network to input features.
+    """
+    def __init__(self, in_channels=128, out_channels=4):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, out_channels, 1)  # Output channels: typically 4 for bounding box coordinates
+        )
+    
+    def forward(self, x):
+        """
+        Forward pass through the dummy tracker.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            
+        Returns:
+            Bounding box predictions [B, 4, H, W]
+        """
+        return self.net(x)
+
+
 # Test code
 if __name__ == "__main__":
     # Create a sample video
