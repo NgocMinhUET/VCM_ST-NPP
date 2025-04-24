@@ -1,10 +1,10 @@
-# Task-Aware Video Compression
+# VCM_ST-NPP: Task-Aware Video Compression
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A deep learning-based framework for task-aware video compression, optimized for applications in computer vision tasks such as object detection, segmentation, and tracking. This system achieves superior rate-distortion performance for downstream tasks compared to traditional video codecs.
+This project implements a task-aware video compression system that optimizes for both compression quality and downstream task performance.
 
 ## Features
 
@@ -28,44 +28,107 @@ The system consists of three main components:
    - **Segmentation**: Semantic segmentation with UNet-based architecture
    - **Tracking**: Multi-object tracking with appearance and motion features
 
-## Installation
+## Setup
 
-### Prerequisites
+### Requirements
 
-- Python 3.8 or higher
-- CUDA-compatible GPU (recommended for training)
-- FFmpeg for video preprocessing
+- Python 3.8+
+- PyTorch 1.12+
+- CUDA (optional, for GPU acceleration)
 
-### Basic Installation
+### Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/username/task-aware-video-compression.git
-   cd task-aware-video-compression
-   ```
-
-2. Create a virtual environment:
-   ```bash
-   # On Windows
-   python -m venv venv
-   .\venv\Scripts\activate
-
-   # On Linux/macOS
-   python -m venv venv
-   source venv/bin/activate
-   ```
-
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### Docker Installation
+#### Linux/Mac
 
 ```bash
-docker build -t task-aware-video-compression .
-docker run --gpus all -it task-aware-video-compression
+# Clone the repository (if not already done)
+git clone <repository-url>
+cd VCM_ST-NPP
+
+# Install dependencies
+chmod +x setup_deps.sh
+./setup_deps.sh
 ```
+
+#### Windows
+
+```bash
+# Clone the repository (if not already done)
+git clone <repository-url>
+cd VCM_ST-NPP
+
+# Install dependencies
+setup_deps.bat
+```
+
+## Common Issues and Solutions
+
+### ModuleNotFoundError: No module named 'sklearn'
+
+This error occurs when scikit-learn is not installed. To fix:
+
+```bash
+pip install scikit-learn
+```
+
+### TensorFlow Warnings
+
+To suppress TensorFlow warnings, the project includes a `fix_tf_warnings.py` module that is automatically imported in the training script. If you're still seeing warnings, you can manually disable them by adding this to your script:
+
+```python
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+```
+
+### CUDA/GPU Issues
+
+If you're experiencing GPU-related errors:
+
+1. Check if CUDA is available:
+   ```python
+   import torch
+   print(torch.cuda.is_available())
+   ```
+
+2. If you want to disable TensorFlow GPU usage:
+   ```python
+   import fix_tf_warnings
+   fix_tf_warnings.disable_tf_gpu()
+   ```
+
+## Training
+
+To train the model:
+
+```bash
+python train.py --dataset /path/to/dataset --task_type tracking --seq_length 5 --epochs 50 --batch_size 4 --lr 1e-4 --qp 30
+```
+
+### Arguments
+
+- `--dataset`: Path to the dataset
+- `--task_type`: Type of task (detection, segmentation, tracking)
+- `--seq_length`: Number of frames in each sequence
+- `--epochs`: Number of training epochs
+- `--batch_size`: Batch size
+- `--lr`: Learning rate
+- `--qp`: Quantization parameter
+
+## Evaluation
+
+To evaluate the model:
+
+```bash
+python evaluate.py --dataset /path/to/dataset --model_checkpoint /path/to/checkpoint --task_type tracking
+```
+
+## Model Architecture
+
+The architecture consists of:
+- Video preprocessing with ST-NPP
+- ProxyCodec for compression
+- Task-specific networks (detector, segmenter, tracker)
+- Combined optimization for both compression quality and task performance
 
 ## Dataset Organization
 

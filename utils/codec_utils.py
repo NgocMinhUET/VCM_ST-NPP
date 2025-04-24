@@ -144,7 +144,7 @@ def decompress_with_ffmpeg(
         # Determine ffmpeg command
         if ffmpeg_path is None:
             ffmpeg_cmd = "ffmpeg"
-        else:
+            else:
             ffmpeg_cmd = ffmpeg_path
         
         # Build command
@@ -216,7 +216,7 @@ def calculate_bitrate(file_path: str, ffprobe_path: Optional[str] = None) -> Opt
             ffprobe_cmd = ffprobe_path
         
         # Build command to get bitrate information
-        cmd = [
+    cmd = [
             ffprobe_cmd,
             "-v", "error",
             "-select_streams", "v:0",
@@ -289,7 +289,7 @@ def calculate_bitrate(file_path: str, ffprobe_path: Optional[str] = None) -> Opt
 def check_ffmpeg_installed() -> bool:
     """
     Check if FFmpeg is installed and available in the system path.
-    
+        
     Returns:
         True if FFmpeg is installed, False otherwise
     """

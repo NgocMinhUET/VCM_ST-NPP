@@ -54,6 +54,16 @@ else
     echo "FFmpeg đã được cài đặt."
 fi
 
+# Kiểm tra xem sklearn đã được cài đặt chưa
+python -c "import sklearn" &> /dev/null
+if [ $? -ne 0 ]; then
+    echo "Warning: scikit-learn installation may have failed. Trying alternative install..."
+    pip install scikit-learn
+fi
+
+# Kiểm tra xem GPU đã được hỗ trợ chưa
+python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+
 echo ""
 echo "=== Cài đặt hoàn tất ==="
 echo "Để kích hoạt môi trường, chạy: conda activate tavp"

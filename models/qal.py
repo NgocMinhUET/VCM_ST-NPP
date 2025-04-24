@@ -350,7 +350,7 @@ class QAL(nn.Module):
         Args:
             qp: Quantization Parameter, either a single value or batch of values
                 Can be an integer, float, or tensor
-                
+            
         Returns:
             Channel-wise scaling vector of shape [B, channels]
         """
@@ -440,7 +440,7 @@ class QALModule(nn.Module):
             
         else:
             raise ValueError(f"Unsupported input dimension: {x.dim()}, expected 4 or 5")
-            
+        
         return scaled_features
 
 

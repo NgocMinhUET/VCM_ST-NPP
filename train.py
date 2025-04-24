@@ -6,6 +6,12 @@ This script trains a combined model that optimizes for both
 compression quality and downstream task performance.
 """
 
+# Import warning suppression first (before any other imports)
+try:
+    import fix_tf_warnings
+except ImportError:
+    print("Warning: fix_tf_warnings.py not found. TensorFlow warnings will not be suppressed.")
+
 import os
 import argparse
 import torch
@@ -20,14 +26,21 @@ import random
 from pathlib import Path
 
 # Import project modules
-from models.combined_model import CombinedModel
-from utils.data_utils import get_dataloader, get_transforms
-from utils.loss_utils import compute_total_loss
-from utils.model_utils import save_model, load_model
-from utils.metric_utils import (
-    compute_psnr, compute_ssim, compute_bpp,
-    evaluate_detection, evaluate_segmentation, evaluate_tracking
-)
+try:
+    from models.combined_model import CombinedModel
+    from utils.data_utils import get_dataloader, get_transforms
+    from utils.loss_utils import compute_total_loss
+    from utils.model_utils import save_model, load_model
+    from utils.metric_utils import (
+        compute_psnr, compute_ssim, compute_bpp,
+        evaluate_detection, evaluate_segmentation, evaluate_tracking
+    )
+except ImportError as e:
+    print(f"Error importing project modules: {e}")
+    print("Please make sure all required packages are installed.")
+    print("Run: pip install -r requirements.txt")
+    import sys
+    sys.exit(1)
 
 
 def parse_args():

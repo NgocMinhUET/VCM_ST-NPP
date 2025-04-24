@@ -1,13 +1,25 @@
-# Core Dependencies
-numpy==1.26.3
-scipy==1.12.0
-matplotlib==3.8.2
-pandas==2.2.0
-tqdm==4.66.1
-pillow==10.2.0
-scikit-learn==1.4.0
-scikit-image==0.22.0
-pyyaml==6.0.1
+# Core dependencies
+torch>=1.12.0
+torchvision>=0.13.0
+numpy>=1.20.0
+Pillow>=9.0.0
+tqdm>=4.62.0
+PyYAML>=6.0
+matplotlib>=3.5.0
+
+# Task-specific libraries
+scikit-learn>=1.0.0
+pycocotools>=2.0.4
+opencv-python>=4.5.0
+connected-components-3d>=3.9.0
+
+# Utilities
+tensorboard>=2.8.0
+seaborn>=0.11.0
+scipy>=1.7.0
+
+# Optional: CUDA support (uncomment if needed)
+# cupy-cuda11x>=10.0.0
 
 # Video Processing
 opencv-python==4.9.0.80
