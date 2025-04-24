@@ -167,83 +167,83 @@ class TaskAwareVideoProcessor(nn.Module):
 
 class CombinedModel(nn.Module):
     """
-    Combined model integrating STNPP, QAL, ProxyCodec, and a task head.
-    A simpler version of TaskAwareVideoProcessor focused on the core components.
+    Combined model that includes a codec and a task network.
+    
+    Args:
+        codec: Codec model for compression and decompression
+        task_network: Task-specific neural network (detection, segmentation, tracking)
+        seq_length: Number of frames in a video sequence
+        task_type: Type of task to perform ('detection', 'segmentation', 'tracking')
+        hidden_channels: Number of hidden channels in model components (default: 64)
     """
-    def __init__(
-        self,
-        channels=3,
-        hidden_channels=64,
-        num_classes=80,
-        qp_levels=51
-    ):
-        """
-        Initialize the combined model.
-        
-        Args:
-            channels: Number of input/output channels (default: 3 for RGB)
-            hidden_channels: Number of channels in hidden layers
-            num_classes: Number of classes for detection
-            qp_levels: Number of QP levels supported
-        """
+    
+    def __init__(self, codec=None, task_network=None, seq_length=5, task_type='detection', hidden_channels=64):
         super(CombinedModel, self).__init__()
         
-        # Spatio-Temporal Neural Preprocessing
-        self.stnpp = STNPP(
-            channels=channels,
-            hidden_channels=hidden_channels
-        )
+        # Store parameters
+        self.task_type = task_type
+        self.seq_length = seq_length
+        self.hidden_channels = hidden_channels
         
-        # Quantization Adaptation Layer
-        self.qal = QAL(
-            channels=hidden_channels,
-            hidden_size=hidden_channels,
-            qp_levels=qp_levels
-        )
+        # Initialize codec
+        if codec is None:
+            from models.proxy_codec import ProxyCodec
+            self.codec = ProxyCodec(hidden_channels=hidden_channels)
+        else:
+            self.codec = codec
         
-        # Proxy Codec
-        self.proxy_codec = ProxyCodec(
-            channels=channels,
-            latent_channels=hidden_channels
-        )
-        
-        # Task head (simple detector)
-        self.task_head = DummyDetector(
-            in_channels=channels,
-            hidden_channels=hidden_channels,
-            num_classes=num_classes
-        )
-        
-    def forward(self, frames, qp=None):
+        # Initialize task network based on task type if not provided
+        if task_network is None:
+            if task_type == 'detection':
+                from models.task_networks.detector import DummyDetector
+                self.task_network = DummyDetector(hidden_channels=hidden_channels)
+            elif task_type == 'segmentation':
+                from models.task_networks.segmenter import DummySegmenter
+                self.task_network = DummySegmenter(hidden_channels=hidden_channels)
+            elif task_type == 'tracking':
+                from models.task_networks.tracker import DummyTracker
+                self.task_network = DummyTracker(hidden_channels=hidden_channels)
+            else:
+                raise ValueError(f"Unsupported task type: {task_type}")
+        else:
+            self.task_network = task_network
+    
+    def forward(self, x, qp=None):
         """
-        Forward pass through the pipeline.
+        Forward pass through the combined model.
         
         Args:
-            frames: Input video frames of shape [B, 5, 3, H, W]
-            qp: Quantization parameter (scalar or tensor)
+            x: Input tensor of shape [B, S, C, H, W] where S is sequence length
+            qp: Quantization parameter (optional)
             
         Returns:
-            Tuple of (reconstructed frames, task output, bitrate)
+            Dictionary containing:
+                - 'reconstructed': Reconstructed frames after codec
+                - 'task_output': Output from task network
+                - 'bitrate': Estimated bitrate
         """
-        # Apply STNPP to extract features from frames
-        # frames shape: [B, 5, 3, H, W]
-        processed_frame = self.stnpp(frames)
+        # Remember original shape
+        original_shape = x.shape
+        batch_size, seq_len, channels, height, width = original_shape
         
-        # Get QAL scaling vector based on QP
-        scaling_vector = self.qal(qp)
+        # Process with codec (reshape to [B*S, C, H, W] for the codec)
+        x_flat = x.reshape(-1, channels, height, width)
         
-        # Apply scaling to the processed frame
-        # Reshape scaling vector to [B, C, 1, 1]
-        scaling_vector = scaling_vector.unsqueeze(-1).unsqueeze(-1)
-        modulated_frame = processed_frame * scaling_vector
+        # Pass through codec
+        reconstructed, bits = self.codec(x_flat, qp)
         
-        # Apply proxy codec
-        reconstructed, bpp = self.proxy_codec(modulated_frame, qp)
+        # Reshape back to [B, S, C, H, W]
+        reconstructed = reconstructed.reshape(batch_size, seq_len, channels, height, width)
         
-        # Apply task head on reconstructed frame
-        task_output = self.task_head(reconstructed)
+        # Pass reconstructed frames to task network
+        task_output = self.task_network(reconstructed)
         
-        return reconstructed, task_output, bpp
+        # Return results as dictionary
+        return {
+            'reconstructed': reconstructed,
+            'task_output': task_output,
+            'bitrate': bits
+        }
 
 
 # Test code
@@ -264,20 +264,20 @@ if __name__ == "__main__":
     
     # Test CombinedModel
     print("Testing CombinedModel...")
-    combined_model = CombinedModel(
-        channels=channels,
-        hidden_channels=64,
-        num_classes=num_classes
-    )
+    combined_model = CombinedModel(task_type='detection')
     
     start_time = time.time()
-    reconstructed, task_output, bpp = combined_model(frames, qp)
+    result = combined_model(frames, qp)
     elapsed = time.time() - start_time
     
     print(f"Input shape: {frames.shape}")
-    print(f"Reconstructed shape: {reconstructed.shape}")
-    print(f"Task output shape: {task_output.shape}")
-    print(f"Bitrate: {bpp.mean().item():.4f} bpp")
+    print(f"Reconstructed shape: {result['reconstructed'].shape}")
+    if isinstance(result['task_output'], dict):
+        for k, v in result['task_output'].items():
+            print(f"Task output '{k}' shape: {v.shape}")
+    else:
+        print(f"Task output shape: {result['task_output'].shape}")
+    print(f"Bitrate: {result['bitrate'].mean().item():.4f} bpp")
     print(f"Forward pass time: {elapsed:.4f} seconds")
     
     # Test TaskAwareVideoProcessor

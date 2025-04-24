@@ -19,34 +19,43 @@ class DummyDetector(nn.Module):
     transform feature inputs into detection outputs (e.g., bounding box
     coordinates or class probabilities).
     """
-    def __init__(self, in_channels=128, hidden_channels=64, num_classes=80):
+    def __init__(self, in_channels=3, hidden_channels=64, num_classes=80):
         """
         Initialize the dummy detector.
         
         Args:
-            in_channels: Number of input channels (default: 128)
+            in_channels: Number of input channels (default: 3)
             hidden_channels: Number of hidden channels (default: 64)
             num_classes: Number of output classes (default: 80, COCO dataset)
         """
         super(DummyDetector, self).__init__()
+        
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.num_classes = num_classes
         
         # Simple convolutional architecture
         self.conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(hidden_channels, num_classes, kernel_size=1)
         
-        self.num_classes = num_classes
-        
     def forward(self, x):
         """
         Forward pass of the dummy detector.
         
         Args:
-            x: Input feature tensor of shape [B, C, H, W]
+            x: Input tensor of shape [B, C, H, W] or [B, T, C, H, W] where T is sequence length
             
         Returns:
             Detection output (class heatmap or bounding box predictions)
         """
+        # Handle sequence input
+        if x.dim() == 5:  # [B, T, C, H, W]
+            batch_size, seq_length = x.shape[:2]
+            # Process middle frame only for simplicity
+            middle_idx = seq_length // 2
+            x = x[:, middle_idx]
+            
         # Apply first convolutional layer
         x = self.conv1(x)
         x = self.relu(x)

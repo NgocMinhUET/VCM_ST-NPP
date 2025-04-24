@@ -128,17 +128,22 @@ class ProxyCodec(nn.Module):
     This module approximates the behavior of traditional codecs like H.264/HEVC
     with fully differentiable operations to enable end-to-end training.
     """
-    def __init__(self, channels=3, latent_channels=64, block_size=8):
+    def __init__(self, channels=3, latent_channels=64, hidden_channels=None, block_size=8):
         """
         Initialize the proxy codec
         
         Args:
             channels: Number of input/output channels
             latent_channels: Number of channels in latent space
+            hidden_channels: Alternative parameter name for latent_channels
             block_size: Size of transform blocks
         """
         super(ProxyCodec, self).__init__()
         
+        # Use hidden_channels if provided, otherwise use latent_channels
+        if hidden_channels is not None:
+            latent_channels = hidden_channels
+            
         self.channels = channels
         self.latent_channels = latent_channels
         self.block_size = block_size

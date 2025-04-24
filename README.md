@@ -61,6 +61,32 @@ cd VCM_ST-NPP
 setup_deps.bat
 ```
 
+### TensorFlow and TensorBoard Compatibility
+
+This project includes TensorBoard for visualization but doesn't directly depend on TensorFlow. To ensure compatibility:
+
+1. TensorFlow and TensorBoard versions must match their major.minor versions (e.g., TensorFlow 2.17.x requires TensorBoard 2.17.x)
+
+2. To fix compatibility issues, run:
+   ```bash
+   python fix_tensor_deps.py
+   ```
+   This script will:
+   - Check installed versions of TensorFlow and TensorBoard
+   - Fix version mismatches
+   - Verify environment consistency
+
+3. If you don't use TensorFlow directly, you can uninstall both and just use PyTorch with a standalone TensorBoard:
+   ```bash
+   pip uninstall -y tensorflow tensorboard
+   pip install tensorboard==2.17.0
+   ```
+
+4. To verify your environment is consistent, run:
+   ```bash
+   pip check
+   ```
+
 ## Common Issues and Solutions
 
 ### ModuleNotFoundError: No module named 'sklearn'

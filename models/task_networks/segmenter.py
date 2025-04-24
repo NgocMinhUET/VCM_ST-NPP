@@ -497,16 +497,56 @@ class ASPP(nn.Module):
 
 
 class DummySegmenter(nn.Module):
-    def __init__(self, in_channels=128, num_classes=21):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, num_classes, 1)
+    """
+    A simplified segmentation network for testing purposes
+    
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels (num_classes)
+        hidden_channels: Number of channels in hidden layers
+    """
+    def __init__(self, in_channels=3, out_channels=2, hidden_channels=64):
+        super(DummySegmenter, self).__init__()
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.hidden_channels = hidden_channels
+        
+        # Simple encoder-decoder architecture
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels // 2, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
         )
-
+        
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(hidden_channels // 2, out_channels, kernel_size=4, stride=2, padding=1)
+        )
+    
     def forward(self, x):
-        return self.net(x)
+        """
+        Forward pass through the dummy segmentation network
+        
+        Args:
+            x: Input tensor of shape [B, C, H, W]
+            
+        Returns:
+            Segmentation logits of shape [B, num_classes, H, W]
+        """
+        # Handle sequence inputs (for video)
+        if x.dim() == 5:  # [B, T, C, H, W]
+            batch_size, seq_length = x.shape[:2]
+            # Process middle frame only for simplicity
+            middle_idx = seq_length // 2
+            x = x[:, middle_idx]
+            
+        features = self.encoder(x)
+        logits = self.decoder(features)
+        
+        return logits
 
 
 # Test code

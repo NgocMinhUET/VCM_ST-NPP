@@ -852,15 +852,24 @@ class DummyTracker(nn.Module):
     """
     A simplified tracker that can be used for testing or as a placeholder.
     This tracker applies a simple convolutional network to input features.
+    
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels (typically 4 for bounding boxes)
+        hidden_channels: Number of channels in the hidden layers
     """
-    def __init__(self, in_channels=128, out_channels=4):
+    def __init__(self, in_channels=3, out_channels=4, hidden_channels=64):
         super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.hidden_channels = hidden_channels
+        
         self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 64, 3, padding=1),
+            nn.Conv2d(in_channels, hidden_channels, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 32, 3, padding=1),
+            nn.Conv2d(hidden_channels, hidden_channels // 2, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, out_channels, 1)  # Output channels: typically 4 for bounding box coordinates
+            nn.Conv2d(hidden_channels // 2, out_channels, 1)  # Output channels: typically 4 for bounding box coordinates
         )
     
     def forward(self, x):
@@ -868,11 +877,18 @@ class DummyTracker(nn.Module):
         Forward pass through the dummy tracker.
         
         Args:
-            x: Input tensor [B, C, H, W]
+            x: Input tensor [B, C, H, W] or [B, T, C, H, W] where T is sequence length
             
         Returns:
             Bounding box predictions [B, 4, H, W]
         """
+        # Handle sequence input
+        if x.dim() == 5:  # [B, T, C, H, W]
+            batch_size, seq_length = x.shape[:2]
+            # Process middle frame only for simplicity
+            middle_idx = seq_length // 2
+            x = x[:, middle_idx]
+            
         return self.net(x)
 
 
