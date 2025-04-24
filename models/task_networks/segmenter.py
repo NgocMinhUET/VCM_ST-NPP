@@ -496,6 +496,19 @@ class ASPP(nn.Module):
         return x
 
 
+class DummySegmenter(nn.Module):
+    def __init__(self, in_channels=128, num_classes=21):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, num_classes, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 # Test code
 if __name__ == "__main__":
     # Parameters
