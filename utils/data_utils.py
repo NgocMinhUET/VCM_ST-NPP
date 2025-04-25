@@ -682,49 +682,47 @@ class DummyVideoDataset(Dataset):
         return result
 
 
-def get_transforms(task_type: str = 'detection', resolution: Tuple[int, int] = (256, 256), augment: bool = True):
+def get_transforms(task_type, resolution=(256, 256), augment=True):
     """
-    Get appropriate transforms for the specified task type.
+    Creates transforms for training and validation.
     
     Args:
-        task_type: Type of task ('detection', 'segmentation', 'tracking')
-        resolution: Target resolution (H, W), defaults to (256, 256)
-        augment: Whether to apply data augmentation transforms, defaults to True
+        task_type: Type of task (detection, segmentation, tracking)
+        resolution: Target resolution (height, width)
+        augment: Whether to apply data augmentation (for training)
         
     Returns:
-        If augment is True: tuple of (train_transform, val_transform)
-        If augment is False: single transform
-        
-    Raises:
-        ValueError: If an unsupported task type is provided
+        A tuple of (train_transform, val_transform)
     """
-    # Basic transforms for both training and validation
-    basic_transforms = [
-        transforms.Resize(resolution),
+    # Common transforms for both training and validation
+    resize_transform = transforms.Resize(resolution)
+    normalize_transform = transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+    
+    # Basic validation transform (no augmentation)
+    val_transform = transforms.Compose([
+        resize_transform,
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ]
+        normalize_transform
+    ])
     
-    # Additional transforms for training with augmentation
-    augmentation_transforms = []
+    # Training transform with optional augmentation
     if augment:
-        if task_type in ['detection', 'tracking', 'segmentation']:
-            augmentation_transforms = [
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                transforms.RandomHorizontalFlip(p=0.5),
-            ]
-    
-    # Create transform compositions
-    train_transform = transforms.Compose(augmentation_transforms + basic_transforms)
-    val_transform = transforms.Compose(basic_transforms)
-    
-    # Return appropriate transforms based on augment flag
-    if augment:
-        return train_transform, val_transform
+        train_transform = transforms.Compose([
+            resize_transform,
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.ToTensor(),
+            normalize_transform
+        ])
     else:
-        return val_transform
-
-
+        # If no augmentation, use the same transform as validation
+        train_transform = val_transform
+    
+    # Return both transforms as a tuple
+    return train_transform, val_transform
 def collate_fn(batch):
     """
     Custom collate function to handle variable-sized labels.
